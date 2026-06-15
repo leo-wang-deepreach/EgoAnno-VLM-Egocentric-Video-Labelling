@@ -109,6 +109,123 @@ def _snap(s: ClipState, stage: str, wd: Path | None = None):
         _log(wd, f"TRACE [{stage}] {len(segs)} segs: {rows}")
 
 
+# --------------------------------------------------------------------------- #
+#  THE TIMELINE — one structure, progressively refined                        #
+# --------------------------------------------------------------------------- #
+def _contact_summary(s: ClipState) -> str:
+    """The RELIABLE 1A possession, collapsed to per-hand object intervals (the authority
+    for who-holds-what / who-is-idle), as compact text for the timeline stages."""
+    tr = build_track(s.contact_frames)
+    out = []
+    for hand, H in (("left", "L"), ("right", "R")):
+        ivs = tr.get(hand, [])
+        parts = [f"{iv.get('interacting_with', '?')} [{iv['start_sec']:.1f}-{iv['end_sec']:.1f}]"
+                 for iv in ivs]
+        out.append(f"{H}: " + ("; ".join(parts) if parts else "empty/absent"))
+    return "\n".join(out)
+
+
+def _transitions_text(s: ClipState) -> str:
+    ev = [e for e in s.transitions if e.get("t") is not None]
+    if not ev:
+        return "(none detected)"
+    return "\n".join(f"{float(e['t']):.1f}s {e.get('hand', '?')} {e.get('kind', '?')} "
+                     f"of {e.get('object', '?')}" for e in ev)
+
+
+def _apply_timeline(s: ClipState, segs_raw, prov: str, wd: Path, label: str) -> bool:
+    """Validate a model-returned timeline and make it THE timeline (in place). Rejects an
+    empty/degenerate result (keeps the previous timeline). Returns True if applied."""
+    clean = []
+    for seg in segs_raw or []:
+        a, b = seg.get("start_sec"), seg.get("end_sec")
+        if a is None or b is None:
+            continue
+        a, b = float(a), float(b)
+        if b - a < 0.05 or a < -0.1 or b > s.duration + 0.5:
+            continue
+        clean.append((max(0.0, a), min(s.duration, b),
+                      str(seg.get("left") or "N/A"), str(seg.get("right") or "N/A")))
+    clean.sort()
+    if not clean or (len(clean) == 1 and s.duration > 6):
+        _log(wd, f"{label}: degenerate timeline ({len(clean)} segs) -> kept previous")
+        return False
+    rebuilt = []
+    for a, b, lft, rgt in clean:
+        sg = Segment(start=round(a, 2), end=round(b, 2), left=lft, right=rgt)
+        sg.boundary_provenance = prov
+        rebuilt.append(sg)
+    s.segments = rebuilt
+    s.track = derive_track_from_labels(s.segments)
+    return True
+
+
+def label_and_collapse(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
+    """STEP 4 (bottom-up): read the reliable dense facts (possession + transitions +
+    bursts + direction) and watch the whole clip at 10fps, producing the COLLAPSED
+    per-hand action timeline in one pass — cut where the action changes, collapse steady
+    runs. Replaces v49 cut-then-label."""
+    prompt = _p("label_collapse.txt", B=round(s.duration, 1),
+                DIRECTION=s.direction or "(unknown)", GOAL=s.goal or "(unknown)",
+                INVENTORY=s.objects_line(), CONTACT=_contact_summary(s),
+                TRANSITIONS=_transitions_text(s),
+                BURSTS="\n".join(s.bursts_reduced) or "(none)")
+    r = gv.watch(prompt, system, SC.TIMELINE, a=0.0, b=s.duration,
+                 fps=FPS_LABEL, max_tokens=8000)
+    _apply_timeline(s, r.get("segments"), "collapse", wd, "P4 label+collapse")
+    _log(wd, f"P4 label+collapse -> {len(s.segments)} segments")
+
+
+def refine_timeline(s: ClipState, system: str, wd: Path):
+    """STEP 5 verifier (model-judged, text-only): read the timeline + the reliable
+    possession facts, RETURN the corrected timeline (object consistency, hand-role,
+    contact-grounded N/A, redundant/missing). No hardcoded rules."""
+    if not s.segments:
+        return
+    prompt = _p("refine_timeline.txt", DIRECTION=s.direction or "(unknown)",
+                GOAL=s.goal or "(unknown)", CONTACT=_contact_summary(s),
+                TIMELINE=s.timeline_text())
+    try:
+        r = claude_call(prompt, [], system, SC.TIMELINE_LC, model=CLAUDE_GATE,
+                        max_tokens=8000)
+    except RuntimeError:
+        _log(wd, "P5 verifier: call failed -> kept timeline")
+        return
+    note = str(r.get("think", ""))[:120]
+    if _apply_timeline(s, r.get("segments"), "verifier", wd, "P5 verifier"):
+        _log(wd, f"P5 verifier -> {len(s.segments)} segments | {note}")
+
+
+def _seed_timeline(s: ClipState):
+    """STEP 1 seed: THE timeline starts as the dense 0.1s facts — one segment per
+    contact-state, each hand's slot = the OBJECT it holds (or N/A if empty). The labeler
+    later collapses these into action sentences."""
+    tr = build_track(s.contact_frames)
+    edges = {0.0, round(s.duration, 2)}
+    for h in ("left", "right"):
+        for iv in tr.get(h, []):
+            edges.add(round(iv["start_sec"], 2)); edges.add(round(iv["end_sec"], 2))
+    bounds = sorted(e for e in edges if 0.0 <= e <= s.duration)
+
+    def _obj_at(hand, t):
+        for iv in tr.get(hand, []):
+            if iv["start_sec"] - 0.01 <= t < iv["end_sec"] + 0.01:
+                o = str(iv.get("interacting_with", "") or "").strip()
+                return o if o and o.lower() not in ("empty", "none", "n/a", "out of frame") else "N/A"
+        return "N/A"
+
+    segs = []
+    for a, b in _spans(bounds):
+        if b - a < 0.05:
+            continue
+        mid = (a + b) / 2
+        sg = Segment(start=round(a, 2), end=round(b, 2),
+                     left=_obj_at("left", mid), right=_obj_at("right", mid))
+        sg.boundary_provenance = "1a_seed"
+        segs.append(sg)
+    s.segments = segs
+
+
 # =========================================================================== #
 #  PHASE 1 — the fact layer                                                    #
 # =========================================================================== #
@@ -794,16 +911,19 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
     gframes_pro = GeminiFrames(GEMINI_NATIVE)    # pro frames: template_match (text only)
     _log(wd, "video ACTIVE")                     # bursts/edge/gate = Claude opus (no flash)
 
-    # ---- FACTS (computed ONCE, cached across attempts) ----
-    phase1_contact(s, gv, system, wd)
-    phase1_transitions(s, system, wd)
-    phase2_bursts(s, system, wd)
-    phase3_direction(s, gv, system, wd)
+    # ============================================================================ #
+    #  ONE TIMELINE, refined step by step. Facts computed once; the dense 0.1s      #
+    #  facts ARE the starting timeline; each stage rewrites it in place.            #
+    # ============================================================================ #
+    phase1_contact(s, gv, system, wd)                 # STEP 1A: objects + per-0.1s contact
+    _seed_timeline(s)                                 # the dense facts ARE the timeline
+    _snap(s, "1A seed (0.1s contact facts)", wd)
+    phase1_transitions(s, system, wd)                 # STEP 1C: transitions annotate it
+    phase2_bursts(s, system, wd)                      # STEP 2: rotation bursts
+    phase3_direction(s, gv, system, wd)               # STEP 3: direction + goal
+    _log(wd, f"facts ready: dir={s.direction}, {len(s.transitions)} transitions")
 
-    # ---- BOUNDED QUALITY LOOP over Phase 4-5 (max_attempts total) ----
-    # Keep the BEST attempt, not the last: a strict gate that never says "good" must not
-    # leave us with a worse final run. Score: gate-good beats not-good, then fewest flags,
-    # then more segments (more granular). Lower score tuple = better.
+    # ---- RETRY LOOP over the refinement chain (keep BEST by gate verdict) ----
     import copy as _copy
     feedback, best = "", None
     for attempt in range(1, max_attempts + 1):
@@ -811,42 +931,36 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
                 + (f" (feedback: {feedback[:90]!r})" if feedback else "") + " ===")
         if attempt > 1 and feedback:
             phase1_transitions(s, system, wd, hint=feedback)   # focused re-scan
-        s.segments, s.flags, s.ran = [], [], set()    # fresh per attempt (critics run once per timeline)
-        phase4(s, gv, gframes_pro, system, wd, max_passes=max_passes, feedback=feedback)
-        gate = phase5_gate(s, gv, system, wd)
+        s.flags, s.ran, s.stage_snapshots = [], set(), []
+        label_and_collapse(s, gv, system, wd)         # STEP 4: collapse facts -> sentences
+        _snap(s, "4 label + collapse", wd)
+        refine_timeline(s, system, wd)                # STEP 5: verifier (model edit)
+        _snap(s, "5 verifier (consistency edit)", wd)
+        rep, afl = AN.analyze(s)                      # STEP 6: code analysis — READ ONLY
+        s.analysis_report = rep
+        s.flags.extend(afl)
+        _log(wd, f"6 code-analysis: +{len(afl)} advisory flags (no timeline change)")
+        gate = phase5_gate(s, gv, system, wd)         # STEP 7: gate + QA (model edit)
+        _snap(s, "7 gate + QA (model edit)", wd)
         verdict = gate.get("quality_verdict", "good")
         score = (0 if verdict == "good" else 1, len(s.flags), -len(s.segments))
         if best is None or score < best[0]:
             best = (score, _copy.deepcopy(s.segments), list(s.flags),
-                    _copy.deepcopy(s.track), attempt)
+                    _copy.deepcopy(s.track), attempt, list(s.stage_snapshots),
+                    s.analysis_report, s.gate_findings, s.purpose_verdict)
         if verdict == "good" or attempt == max_attempts:
             _log(wd, f"=== quality={verdict} after attempt {attempt}; "
                     f"best=attempt {best[4]} (score {best[0]}) -> accept ===")
             break
         feedback = (gate.get("rerun_feedback") or
-                    "Re-check for missed place/pickup/handoff boundaries.")
-    # restore the best attempt (clear the per-attempt guard so the final critics run on it)
-    s.segments, s.flags, s.track, s.ran = best[1], best[2], best[3], set()
-    s.stage_snapshots = []                            # trace the EXPORTED lineage only
-    _snap(s, f"P4+P5 accepted (attempt {best[4]}: labeler + gate)", wd)
+                    "Re-check for missed place/pickup/throw boundaries.")
+    # restore the best attempt
+    (s.segments, s.flags, s.track, _, s.stage_snapshots,
+     s.analysis_report, s.gate_findings, s.purpose_verdict) = best[1:]
 
-
-    # ---- FINAL polish + audit, ONCE on the accepted timeline (before export) ----
-    delete_only_critic(s, system, wd)                 # merge any over-split runs
-    s.track = derive_track_from_labels(s.segments)
-    _snap(s, "P4d delete-only critic", wd)
-    added = completeness_check(s, gv, system, wd)     # folds missing pick/place into s.transitions
-    if added:                                         # turn those findings into real segments
-        _log(wd, f"=== completeness added {added} missing transition(s) -> final round (broad->refine) ===")
-        s.ran.discard("merge_critic")                 # let the critic clean the new timeline
-        phase4(s, gv, gframes_pro, system, wd, max_passes=1)   # re-segment+label with augmented transitions
-        delete_only_critic(s, system, wd)
-        s.track = derive_track_from_labels(s.segments)
-        _snap(s, "P4e completeness re-segment", wd)
-
-    # ---- PHASE 6: fresh-eye final review (context-free), the last word ----
+    # ---- STEP 8: fresh-eye final review (context-free), once on the best ----
     fresh_eye(s, system, wd)
-    _snap(s, "P6 fresh-eye (final, exported)", wd)
+    _snap(s, "8 fresh-eye (final, exported)", wd)
 
     episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)
     _log(wd, f"=== DONE {time.time()-t0:.0f}s | {len(s.segments)} segments, "

@@ -1,0 +1,33 @@
+You produce the FULL per-hand action timeline for this clip in ONE pass, for robot learning. Apply the named disciplines from your system prompt (FOREARM L/R, ACTING vs SUPPORTING, ANTI-MIRROR, TRACK-GROUNDED ROLE, MIXED-IS-TERMINAL, STILL-NOT-HOLD, COMPLETE-THE-ACTION).
+
+You watch the WHOLE clip from 0 to <<B>>s at 10 fps (top-right clock = absolute seconds, the time authority). You are also given RELIABLE pre-computed facts — trust them as your primary ground, use the frames to name the visible motion:
+
+Decided direction (settled): <<DIRECTION>>
+Task goal (derived hypothesis): <<GOAL>>
+Object catalogue (use these identities, spelled the same way every time): <<INVENTORY>>
+
+RELIABLE per-hand possession over time (the 1A ground truth — which object each forearm holds, or "empty"; this is your authority for WHO holds WHAT and WHO is idle, per hand — never swap L/R):
+<<CONTACT>>
+
+DETECTED TRANSITIONS (a dense frame scan — strong evidence of the brief boundary events; honor them):
+<<TRANSITIONS>>
+
+Decisive rotation/role/colour bursts (reliable for those moments):
+<<BURSTS>>
+
+=== YOUR JOB: COLLAPSE THE FACTS INTO AN ACTION TIMELINE ===
+Build one continuous, non-overlapping per-hand timeline covering 0 to <<B>>s.
+- CUT a new segment exactly where an action CHANGES: a hand starts/stops gripping (per the possession facts), a detected place/pickup/throw/handoff, a new object enters a hand, or the motion itself changes (e.g. threading -> placing). The possession facts + transitions tell you where these boundaries are.
+- COLLAPSE: while both hands keep doing the SAME thing to the SAME object, it is ONE segment, however long — do not chop a steady action into slivers.
+- LABEL each hand for each segment: a 2-8 word sentence, ONE action head, "<verb> the <object> [short modifier]"; or exactly "N/A" if the possession facts show that hand empty/out-of-frame across the segment.
+
+=== LABEL THE CHANGE, NOT THE BACKGROUND ===
+- A grip that OPENS = a place ("place the <object>") or, if a quick toss/flick/fling, "throw the <object>" — never "hold". A grip that CLOSES on a resting object = "pick up the <object>". Put the action on the hand whose grip actually changed (per the facts); never pin it on the wrong hand.
+- "hold"/"steady"/"brace" only for a hand gripping ONE object and keeping it still the whole segment with no release and no manipulation.
+- Judge each segment's action from its MIDDLE; the edges are reference.
+- N/A is per-hand and grounded in the possession facts: a hand the facts show gripping is NEVER N/A (at least "hold the <object>"); a hand the facts show empty is N/A. Do not put N/A on a gripping hand.
+- TWO PARTS IN A JOIN: the hands usually hold DIFFERENT parts — one steadies the base, the other turns/threads/places the other part. Name each hand's actual part distinctly.
+- Vague verbs BANNED (manipulate/handle/work/adjust/use). Verbs consistent with the decided direction.
+
+Raw JSON only:
+{"think": "<2-3 sentences: the repeated structure you see and where the boundaries are>", "segments": [{"start_sec": <n>, "end_sec": <n>, "left": "<phrase or N/A>", "right": "<phrase or N/A>"}]}

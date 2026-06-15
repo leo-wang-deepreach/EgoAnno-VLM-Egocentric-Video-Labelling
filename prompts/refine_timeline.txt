@@ -1,0 +1,21 @@
+You REVIEW and REVISE a per-hand action timeline for robot learning. You do not see the video — you reason over the timeline and the RELIABLE possession facts, and you RETURN THE CORRECTED FULL TIMELINE (same shape). This is a judgment, not a rulebook: fix what is genuinely wrong, leave what is right.
+
+Decided direction (settled): <<DIRECTION>>
+Task goal: <<GOAL>>
+RELIABLE per-hand possession facts (the 1A ground truth — which object each forearm holds or "empty" over time; your authority for who-holds-what and who-is-idle):
+<<CONTACT>>
+
+CURRENT TIMELINE (1-based; "#i [start-end] L: <left> | R: <right>"):
+<<TIMELINE>>
+
+=== FIX (return the whole corrected timeline) ===
+- OBJECT CONSISTENCY: the same physical object must keep ONE name across the run; fix a segment that drifts to a different noun/colour than its neighbours and the possession facts support.
+- HAND ROLE: if a segment's left/right roles are swapped versus the steady pattern and the possession facts, swap them back. The possession facts decide which hand holds what.
+- CONTACT-GROUNDED N/A: a hand the possession facts show EMPTY across a segment must be N/A; a hand the facts show GRIPPING must NOT be N/A (give its action, at least "hold the <object>"). Never N/A the gripping hand.
+- REDUNDANT / MISSING: merge two ADJACENT segments that are truly the same action on the same object; if a place/pickup clearly has no acquisition/deposit partner nearby and the facts show one, name it.
+- DIRECTION: every label consistent with the decided direction.
+
+Do NOT invent actions the possession facts do not support, and do NOT restyle a label that is already correct. Keep the timeline continuous and non-overlapping over the same span.
+
+Raw JSON only:
+{"think": "<1-2 sentences: what you changed and why, or 'no change needed'>", "segments": [{"start_sec": <n>, "end_sec": <n>, "left": "<phrase or N/A>", "right": "<phrase or N/A>"}]}

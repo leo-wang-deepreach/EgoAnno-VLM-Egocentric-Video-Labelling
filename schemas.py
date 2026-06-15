@@ -90,6 +90,25 @@ VIDEO_LABEL_NATIVE = {
     "required": ["think", "left", "right"],
 }
 
+# THE timeline — one structure every refining stage reads and rewrites (NATIVE uppercase).
+# label_and_collapse produces it from the dense facts; verifier/gate/fresh-eye return
+# corrected versions of it.
+TIMELINE = {
+    "type": "OBJECT",
+    "properties": {
+        "think": {"type": "STRING"},
+        "segments": {"type": "ARRAY", "items": {
+            "type": "OBJECT",
+            "properties": {
+                "start_sec": {"type": "NUMBER"},
+                "end_sec": {"type": "NUMBER"},
+                "left": {"type": "STRING"},
+                "right": {"type": "STRING"}},
+            "required": ["start_sec", "end_sec", "left", "right"]}},
+    },
+    "required": ["segments"],
+}
+
 # Phase 3 — direction (also DERIVES the goal)
 DIRECTION_DECIDE = {
     "type": "OBJECT",
@@ -127,6 +146,25 @@ WINDOW_TRANSITIONS = {
             "additionalProperties": False}},
     },
     "required": ["events"],
+    "additionalProperties": False,
+}
+
+# THE timeline, lowercase variant for frame/Claude models (verifier, etc.)
+TIMELINE_LC = {
+    "type": "object",
+    "properties": {
+        "think": {"type": "string"},
+        "segments": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "start_sec": {"type": "number"},
+                "end_sec": {"type": "number"},
+                "left": {"type": "string"},
+                "right": {"type": "string"}},
+            "required": ["start_sec", "end_sec", "left", "right"],
+            "additionalProperties": False}},
+    },
+    "required": ["segments"],
     "additionalProperties": False,
 }
 
