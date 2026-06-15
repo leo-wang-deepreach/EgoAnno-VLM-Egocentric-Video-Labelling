@@ -8,6 +8,7 @@ List every DISTINCT physical object that appears anywhere in this window. Give e
 The object set is NOT fixed — watch the whole window for it to change:
   - DECOMPOSITION (one object -> several): when a sub-part visibly SEPARATES from an object — a sticky strip / protective film / red peel-off layer pulled off a sealed bag, a cap removed from a body, a label peeled, a lid taken off — the separated part becomes its OWN catalogue entry from the moment it appears (e.g. "clear sealed bag" + "red peel-off strip"). Name the parts you can see, not just the whole.
   - COMBINATION (several -> one): when separate parts are visibly joined into a unit, the unit is one entry from then on; after they separate again it stops being a unit.
+  - TWO SIMILAR PARTS IN A JOIN: a fastening (screwing / threading / pressing one part onto another) involves TWO distinct parts even when they share colour/material — typically a longer base part AND a smaller part turned/placed onto it (a ring, nut, cap, collar). Catalogue BOTH as separate objects by form (e.g. "long silver shaft" + "small silver ring"), not one. Across the window the two hands usually hold DIFFERENT parts — one steadies the base, the other turns/places the smaller part. Do NOT report both hands gripping the same single object through an entire fastening; look for the smaller worked part.
 List the parts as their own objects the instant they exist; this is why watching the full window matters.
 
 === PER-FRAME RECORD ===

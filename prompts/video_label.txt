@@ -24,6 +24,15 @@ Next segment's label (continuity, TEXT only):     L: <<NEXT_LEFT>> | R: <<NEXT_R
 3. RECONCILE (a transfer needs a giver AND a receiver; one hand may support what the other works).
 4. Run the named checks the system prompt defines.
 
+=== LABEL THE CHANGE, NOT THE BACKGROUND ACTION (most important) ===
+This segment was cut HERE because something changed. Name what each hand actually DOES in this span — the brief defining action WINS over the steady background motion:
+- If a hand RELEASES / throws / drops / sets down / lets go of an object anywhere in this span, that hand's label is a PLACE or RELEASE ("place the <object>", "drop the <object>") — NEVER "hold", and never the ongoing "twist/thread". A grip that opens is a place, full stop.
+- If a hand CLOSES on a new object (empty, then gripping), that hand's label is "pick up the <object>" — not "hold".
+- Identify WHICH hand changed: the hand whose grip OPENS or CLOSES is the actor of the place/pick — put the action on THAT hand. The other hand gets its own real action or N/A. Never pin the change on the wrong hand (e.g. labelling the placing hand "hold" and the steady hand "pick up").
+- "hold"/"steady"/"brace" is allowed ONLY for a hand that grips ONE object and keeps it still for the WHOLE span with NO release and NO manipulation. If anything happens to that object, name that instead — "hold" is never the answer when an action occurs.
+- If a DETECTED TRANSITION is supplied below, it is strong evidence a place/pickup happens here — your label MUST reflect it, overriding any "hold"/"twist".
+- TWO PARTS IN A JOIN: when the hands work a join, they usually hold DIFFERENT parts — one steadies the base part, the other turns/threads/places the OTHER part onto it. Name each hand's ACTUAL part distinctly (the turned/placed part vs the held base), even if similar in colour/material; do not collapse both to one name.
+
 Each non-N/A label: 2-8 words, ONE action head, "<verb> the <object> [short modifier]". No "then/while/and", no pronouns, never "left hand"/"right hand" inside a label.
 
 NAME THE SPECIFIC ACTION — vague verbs are BANNED. Never use "manipulate", "handle", "work", "interact with", "use", "adjust", or "do something to". State the actual visible motion: hold/steady/brace, thread/screw/twist/turn/tighten/loosen/unscrew, insert/seat, pick up/grab/lift, place/set down/drop/release, push/pull, hand off. The verb must be consistent with the decided direction (assembly → joining verbs like thread/screw-on/insert; disassembly → separating verbs like unscrew/remove/pull-out). If you genuinely cannot tell which motion it is, pick the most specific one the frames support — never fall back to a vague verb.
