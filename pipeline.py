@@ -532,6 +532,17 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     s.purpose_verdict = r.get("purpose_verdict", "")
     if r.get("purpose_check"):
         s.goal = r["purpose_check"] if s.purpose_verdict == "corrected" else s.goal
+    # DIRECTION CORRECTION: if the gate (seeing the frames) reads the opposite direction,
+    # flip it and force a relabel pass so the whole timeline re-flows with correct verbs.
+    _DIRS = {"assembly", "disassembly", "transfer_or_portioning",
+             "mixed_or_alternating", "other_or_ambiguous"}
+    newdir = r.get("direction")
+    if newdir in _DIRS and newdir != s.direction:
+        _log(wd, f"P5 gate CORRECTED direction: {s.direction} -> {newdir} -> relabel")
+        s.direction = newdir
+        r["quality_verdict"] = "needs_rerun"          # next attempt relabels with new direction
+        r["rerun_feedback"] = (f"Direction corrected to '{newdir}'; relabel all verbs to match. "
+                               + str(r.get("rerun_feedback", "")))
     # apply corrections to flagged segments only
     nc = 0
     for c in r.get("corrections", []):

@@ -238,6 +238,9 @@ GATE = {
     "properties": {
         "purpose_check": {"type": "string"},
         "purpose_verdict": {"type": "string", "enum": ["confirmed", "corrected"]},
+        "direction": {"type": "string",
+                      "enum": ["assembly", "disassembly", "transfer_or_portioning",
+                               "mixed_or_alternating", "other_or_ambiguous"]},
         "findings": {"type": "string"},
         "merge_at_sec": {"type": "array", "items": {"type": "number"}},
         "split_request": {"type": "array", "items": {"type": "integer"}},
@@ -254,7 +257,7 @@ GATE = {
         "request_merge_critic": {"type": "boolean"},
         "request_completeness": {"type": "boolean"},
     },
-    "required": ["purpose_check", "purpose_verdict", "findings",
+    "required": ["purpose_check", "purpose_verdict", "direction", "findings",
                  "merge_at_sec", "split_request", "corrections",
                  "quality_verdict", "rerun_feedback",
                  "request_merge_critic", "request_completeness"],
