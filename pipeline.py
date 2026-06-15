@@ -822,11 +822,8 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
                     del s.segments[i + 1]
                     nm += 1
                 break
-    for sr in r.get("split_request", []):
-        idx = int(sr) - 1
-        if 0 <= idx < len(s.segments):
-            s.flags.append(Flag(idx, "gate_split_request", "gate",
-                                "gate asked for a split; routed to review"))
+    # split_request dropped: in the one-timeline model the gate edits DIRECTLY (relabel +
+    # merge); a needed split is the labeler/collapse's job, not an orphan flag nobody reads.
     _log(wd, f"P5 gate: purpose={s.purpose_verdict}, {nc} corrections, {nm} seam-merges, "
             f"quality={r.get('quality_verdict')}")
     # on-demand: the gate may invoke either critic specifically (each guarded to once)
