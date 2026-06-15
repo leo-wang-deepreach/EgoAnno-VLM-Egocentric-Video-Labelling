@@ -190,3 +190,47 @@ def render_strip(clocked: str, a: float, b: float, fps: float, track: dict,
         is_ctx = t < a - 0.05 or t > b + 0.05
         frames.append(add_edge_tabs(b64, dim=is_ctx and ctx > 0))
     return frames, track_caption(track, a, b)
+
+
+def _overlay_labels(b64_jpeg: str, left: str, right: str) -> str:
+    """Burn the CURRENTLY-ASSIGNED L/R labels onto a frame for the fresh-eye review:
+    'L: <left>' top-left, 'R: <right>' top-right, plus the L|/|R edge tabs."""
+    im = Image.open(BytesIO(base64.b64decode(b64_jpeg))).convert("RGB")
+    W, H = im.size
+    d = ImageDraw.Draw(im)
+    fnt = _font(max(16, H // 34))
+    pad = 5
+    for text, anchor in ((f"L: {left}", "left"), (f"R: {right}", "right")):
+        tw = d.textlength(text, font=fnt)
+        if anchor == "left":
+            box = (0, 0, tw + 2 * pad, fnt.size + 2 * pad); tx = pad
+        else:
+            box = (W - tw - 2 * pad, 0, W, fnt.size + 2 * pad); tx = W - tw - pad
+        d.rectangle(box, fill=(0, 0, 0))
+        col = (120, 200, 255) if anchor == "left" else (255, 160, 160)
+        d.text((tx, pad), text, fill=col, font=fnt)
+    _tab(d, (8, H - 8), "L|", _font(max(20, H // 28)), "left")
+    _tab(d, (W - 8, H - 8), "|R", _font(max(20, H // 28)), "right")
+    buf = BytesIO()
+    im.save(buf, format="JPEG", quality=85)
+    return base64.b64encode(buf.getvalue()).decode()
+
+
+def render_labeled(clocked: str, segments, fps: float, workdir: str,
+                   max_side: int = 720, cap_frames: int = 80) -> list[str]:
+    """Whole-clip frames with each segment's assigned L/R label overlaid — the input to
+    the fresh-eye review. The model sees the video AS LABELLED and corrects mismatches.
+    `segments` is a list of objects with .start/.end/.left/.right."""
+    if not segments:
+        return []
+    dur = max(s.end for s in segments)
+    raw = extract_frames(clocked, 0.0, dur, fps, max_side, workdir)
+    if len(raw) > cap_frames:
+        step = len(raw) / cap_frames
+        raw = [raw[int(i * step)] for i in range(cap_frames)]
+    out = []
+    for t, b64 in raw:
+        seg = next((s for s in segments if s.start - 0.05 <= t <= s.end + 0.05),
+                   segments[-1])
+        out.append(_overlay_labels(b64, seg.left or "N/A", seg.right or "N/A"))
+    return out

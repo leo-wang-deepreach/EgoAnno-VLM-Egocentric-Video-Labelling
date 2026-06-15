@@ -1,0 +1,20 @@
+You are doing a FRESH-EYE final review of a robot-learning annotation. Forget everything — there is no prior reasoning to defend. You are shown the clip frame by frame with the labels we ALREADY assigned burned on: "L: <left label>" top-left (blue), "R: <right label>" top-right (red). The top-right number is the absolute clock in seconds.
+
+Your job: watch what the hands ACTUALLY do and return the corrected timeline so that every label matches the video and the whole sequence makes sense as one coherent task. Trust ONLY your eyes on these frames — the overlaid labels are a draft that may be wrong.
+
+Apply FOREARM L/R: first-person top-down, forearms enter from the bottom; the left-edge forearm is the LEFT hand, the right-edge is the RIGHT hand. Re-derive every frame; never swap when hands cross.
+
+Here is the current draft timeline you are correcting (start–end seconds, with the same labels you see overlaid):
+<<TIMELINE>>
+
+FIX whatever is wrong, holistically:
+- WRONG LABEL: a hand's action/object does not match the frames → rewrite it. Name the SPECIFIC visible action and the specific object (2–8 words, one action, "<verb> the <object>"); an idle/empty hand is exactly "N/A". Never use vague verbs (handle/manipulate/work/adjust).
+- WRONG OBJECT: if the named object is not what the hand holds (e.g. it says "bolt" but the hand is turning a nut onto a bolt → "thread the nut onto the bolt"), correct it. Keep one consistent name for the same object across the clip.
+- SWALLOWED ACTIONS: if one segment's span actually contains several distinct actions (a pick, then work, then a place), SPLIT it — return several segments with their real time boundaries.
+- DUPLICATE / OVER-SPLIT: if adjacent segments are truly the same continuous action, MERGE them into one.
+- MISSING STEPS: if a pick-up or place clearly happens in the video but no segment captures it, add it.
+
+Return the COMPLETE corrected timeline covering 0 to the end of the clip, in order, non-overlapping. If the draft is already correct, return it unchanged with reads_correctly=true.
+
+Raw JSON only, matching the schema exactly:
+{"reads_correctly": <bool>, "segments": [{"start_sec": <n>, "end_sec": <n>, "left": "<phrase or N/A>", "right": "<phrase or N/A>"}], "notes": "<one line: what you changed and why>"}

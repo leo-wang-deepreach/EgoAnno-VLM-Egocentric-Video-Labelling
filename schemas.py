@@ -221,3 +221,24 @@ GATE = {
                  "request_merge_critic", "request_completeness"],
     "additionalProperties": False,
 }
+
+# Fresh-eye final review (Claude opus, sees the clip with labels overlaid, NO other
+# context) — returns the corrected whole timeline so every label matches the video.
+FRESH_EYE = {
+    "type": "object",
+    "properties": {
+        "reads_correctly": {"type": "boolean"},
+        "segments": {"type": "array", "items": {
+            "type": "object",
+            "properties": {
+                "start_sec": {"type": "number"},
+                "end_sec": {"type": "number"},
+                "left": {"type": "string"},
+                "right": {"type": "string"}},
+            "required": ["start_sec", "end_sec", "left", "right"],
+            "additionalProperties": False}},
+        "notes": {"type": "string"},
+    },
+    "required": ["reads_correctly", "segments", "notes"],
+    "additionalProperties": False,
+}

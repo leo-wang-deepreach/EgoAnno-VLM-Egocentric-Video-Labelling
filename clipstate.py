@@ -70,6 +70,7 @@ class ClipState:
     # --- Phase 4 ---
     segments: list[Segment] = field(default_factory=list)
     flags: list[Flag] = field(default_factory=list)
+    analysis_report: str = ""                              # code-generated advisory facts
 
     # --- run-once guards for on-demand critics (merge_critic / completeness) ---
     ran: set = field(default_factory=set)

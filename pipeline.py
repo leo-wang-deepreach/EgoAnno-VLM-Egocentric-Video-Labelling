@@ -18,12 +18,13 @@ import concurrent.futures as cf
 import time
 from pathlib import Path
 
+import analysis as AN
 import bursts as B
 import qa as QA
 import schemas as SC
 from clipstate import (ClipState, Flag, Segment, build_track,
                        derive_track_from_labels, track_possession_changes)
-from media import burn_clock, probe_duration, render_strip
+from media import burn_clock, probe_duration, render_labeled, render_strip
 from models import (CLAUDE_GATE, GEMINI_NATIVE, USAGE,
                     GeminiFrames, GeminiVideo, claude_call)
 
@@ -38,6 +39,7 @@ FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visi
 FPS_LABEL = 10.0          # per-segment NATIVE labeling / focused refine
 FPS_EDGE = 30.0
 FPS_GATE = 2.0
+FPS_FRESH = 4.0           # frames for the context-free fresh-eye overlay review
 CONTACT_WIN = 20.0        # seconds per 10fps contact-track window
 EDGE_HALF = 0.6           # edge verifier half-window
 LABEL_CTX = 1.0           # neighbor overlap for the labeler
@@ -607,6 +609,11 @@ def phase4(s: ClipState, gv: GeminiVideo, gframes_pro: GeminiFrames,
         _log(wd, f"P4 refine pass {k+1} changed the segment set -> another pass")
     template_match(s, gframes_pro, wd)
     neighbor_review(s, gframes_pro, wd)               # v49 label-sequence consistency
+    rep, afl = AN.analyze(s)                          # deterministic code analysis (advisory)
+    s.analysis_report = rep
+    s.flags.extend(afl)
+    _log(wd, f"P4 code-analysis: +{len(afl)} advisory flags "
+            f"{[f.type for f in afl]}")
 
 
 # =========================================================================== #
@@ -619,7 +626,8 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     r = claude_call(_p("opus_final.txt", DIRECTION=s.direction, GOAL=s.goal,
                        TRACK=s.track_lines(),
                        BURSTS="\n".join(s.bursts_reduced) or "(none)",
-                       TIMELINE=s.timeline_text(), FLAGGED=flagged),
+                       TIMELINE=s.timeline_text(), FLAGGED=flagged,
+                       ANALYSIS=s.analysis_report or ""),
                     frames, system, SC.GATE, model=CLAUDE_GATE)
     s.gate_findings = str(r.get("findings", ""))[:600]
     s.purpose_verdict = r.get("purpose_verdict", "")
@@ -666,6 +674,52 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     if r.get("request_completeness"):
         completeness_check(s, gv, system, wd)
     return r
+
+
+# =========================================================================== #
+#  PHASE 6 — fresh-eye final review (context-free)                            #
+# =========================================================================== #
+def fresh_eye(s: ClipState, system: str, wd: Path):
+    """FINAL pass: show opus the whole clip with the assigned L/R labels overlaid and
+    NOTHING else (no flags, no track, no analysis, no bursts) — fresh eyes re-read the
+    pixels and return a corrected timeline so the labels match the video and the
+    sequence makes sense. Last word before export; degenerate rewrites are rejected."""
+    if not s.segments:
+        return
+    frames = render_labeled(s.clocked, s.segments, FPS_FRESH, str(wd),
+                            max_side=720, cap_frames=80)
+    if not frames:
+        return
+    try:
+        r = claude_call(_p("fresh_eye.txt", TIMELINE=s.timeline_text()),
+                        frames, system, SC.FRESH_EYE, model=CLAUDE_GATE, max_tokens=4000)
+    except RuntimeError:
+        _log(wd, "P6 fresh-eye: call failed, kept timeline")
+        return
+    clean = []
+    for seg in r.get("segments", []):
+        a, b = seg.get("start_sec"), seg.get("end_sec")
+        if a is None or b is None:
+            continue
+        a, b = float(a), float(b)
+        if b - a < 0.05 or a < -0.1 or b > s.duration + 0.5:
+            continue
+        clean.append((max(0.0, a), min(s.duration, b),
+                      str(seg.get("left") or "N/A"), str(seg.get("right") or "N/A")))
+    clean.sort()
+    if len(clean) < 1 or (len(clean) == 1 and s.duration > 6):
+        _log(wd, f"P6 fresh-eye: rejected degenerate rewrite ({len(clean)} segs), kept timeline")
+        return
+    rebuilt = []
+    for (a, b, lft, rgt) in clean:
+        sg = Segment(start=round(a, 2), end=round(b, 2), left=lft, right=rgt)
+        sg.boundary_provenance = "fresh_eye"
+        rebuilt.append(sg)
+    n0 = len(s.segments)
+    s.segments = rebuilt
+    s.track = derive_track_from_labels(s.segments)
+    _log(wd, f"P6 fresh-eye: reads_correctly={r.get('reads_correctly')}; "
+            f"{n0} -> {len(rebuilt)} segs | {str(r.get('notes',''))[:90]}")
 
 
 # =========================================================================== #
@@ -736,6 +790,9 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
         phase4(s, gv, gframes_pro, system, wd, max_passes=1)   # re-segment+label with augmented transitions
         delete_only_critic(s, system, wd)
         s.track = derive_track_from_labels(s.segments)
+
+    # ---- PHASE 6: fresh-eye final review (context-free), the last word ----
+    fresh_eye(s, system, wd)
 
     episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)
     _log(wd, f"=== DONE {time.time()-t0:.0f}s | {len(s.segments)} segments, "
