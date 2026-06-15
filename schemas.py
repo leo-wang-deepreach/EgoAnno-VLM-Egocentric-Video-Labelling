@@ -119,7 +119,8 @@ WINDOW_TRANSITIONS = {
             "properties": {
                 "t": {"type": "number"},
                 "hand": {"type": "string", "enum": ["left", "right", "both"]},
-                "kind": {"type": "string", "enum": ["place", "pickup", "handoff"]},
+                "kind": {"type": "string",
+                         "enum": ["place", "pickup", "handoff", "throw"]},
                 "object": {"type": "string"},
                 "evidence": {"type": "string"}},
             "required": ["t", "hand", "kind", "object", "evidence"],

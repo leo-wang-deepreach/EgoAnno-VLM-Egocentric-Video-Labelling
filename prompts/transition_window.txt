@@ -3,7 +3,8 @@ You inspect a SHORT window of an egocentric two-handed manipulation clip and rep
 This window covers t=<<WA>>s to t=<<WB>>s, shown frame by frame.
 
 === REPORT EACH OF THESE, WITH ITS EXACT TIME ===
-  - place    : a hand lowers an object onto the surface and OPENS its grip (the object stays on the table, the hand leaves it). Report the instant the grip opens.
+  - place    : a hand lowers an object onto the surface and OPENS its grip GENTLY (the object stays where set, the hand leaves it). Report the instant the grip opens.
+  - throw    : a hand RELEASES an object with a quick toss/flick/fling — the object is cast away or dropped from a height into a pile/bin, not set down carefully. If the release is fast and the object travels after leaving the hand, it is a THROW, not a place. Report the instant of release.
   - pickup   : a hand CLOSES its grip on an object that was resting on the surface and lifts it. Report the instant the grip closes.
   - handoff  : an object passes directly from one hand to the other (giver opens, receiver grips). Report once, at the transfer.
 

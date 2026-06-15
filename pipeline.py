@@ -731,11 +731,12 @@ def actuate_transitions(s: ClipState, wd: Path):
     split there; (2) force the ACTING hand's label of the (short) transition segment to
     that action — 'place/pick up the <object>'. Object name comes from the detection."""
     trans = [e for e in s.transitions if e.get("t") is not None
-             and e.get("kind") in ("place", "pickup", "handoff")
+             and e.get("kind") in ("place", "pickup", "handoff", "throw")
              and 0.3 < float(e["t"]) < s.duration - 0.3]
     if not trans or not s.segments:
         return
-    verbs = {"place": "place", "pickup": "pick up", "handoff": "hand off"}
+    verbs = {"place": "place", "pickup": "pick up", "handoff": "hand off",
+             "throw": "throw"}
     # 1. SPLIT swallowed transitions (no boundary within 0.5s) out of their segment
     bounds = {round(g.start, 2) for g in s.segments} | {round(g.end, 2) for g in s.segments}
     new_cuts = sorted({round(float(e["t"]), 2) for e in trans
@@ -759,9 +760,9 @@ def actuate_transitions(s: ClipState, wd: Path):
 
     # 2. FORCE the acting-hand label at each transition (short transition segs only)
     def _seg_at(t, kind):
-        # a place culminates AT t -> the segment ENDING there; a pickup begins AT t ->
-        # the segment STARTING there; otherwise the segment containing t.
-        if kind == "place":
+        # a place/throw culminates AT t -> the segment ENDING there; a pickup begins AT t
+        # -> the segment STARTING there; otherwise the segment containing t.
+        if kind in ("place", "throw"):
             g = next((g for g in s.segments if abs(g.end - t) <= 0.6), None)
             if g:
                 return g
@@ -788,6 +789,52 @@ def actuate_transitions(s: ClipState, wd: Path):
     merge_identical_labels(s, wd)
     s.track = derive_track_from_labels(s.segments)
     _log(wd, f"P-act: enforced {n} transition label(s) from detected place/pickup")
+
+
+def _hand_contact_in(s: ClipState, hand: str, a: float, b: float):
+    """From the accurate 1A contact track: (empty_fraction, [objects gripped], n_frames)
+    for `hand` over [a, b]."""
+    key = f"{hand}_touching"
+    n = empty = 0
+    objs = []
+    for fr in s.contact_frames:
+        t = fr.get("t")
+        if t is None or not (a - 0.05 <= t <= b + 0.05):
+            continue
+        n += 1
+        v = str(fr.get(key, "") or "").strip()
+        if v == "" or v.lower() in ("empty", "out of frame", "none", "n/a"):
+            empty += 1
+        else:
+            objs.append(v)
+    return (empty / n if n else 1.0), objs, n
+
+
+def ground_in_contact(s: ClipState, wd: Path):
+    """The 1A object/contact track is the reliable signal — ground each label's N/A in it
+    DETERMINISTICALLY (no model, no swap): a hand the track shows GRIPPING is never N/A
+    (at least 'hold the <object>'); a hand the track shows EMPTY across the span is N/A,
+    UNLESS its label is a brief place/pick/throw (the hand is momentarily empty then).
+    Fixes the mis-attribution where the empty hand is right but the LEFT got N/A."""
+    from collections import Counter
+    fixed = 0
+    for seg in s.segments:
+        for h in ("left", "right"):
+            ef, objs, n = _hand_contact_in(s, h, seg.start, seg.end)
+            if n == 0:
+                continue
+            cur = (getattr(seg, h) or "").strip()
+            is_na = (cur == "") or cur.lower() == "n/a"
+            momentary = cur.lower().startswith(("place", "pick", "throw", "hand"))
+            if ef <= 0.3 and objs and is_na:
+                obj = Counter(o.lower() for o in objs).most_common(1)[0][0]
+                setattr(seg, h, f"hold the {obj}"); fixed += 1
+            elif ef >= 0.75 and not is_na and not momentary:
+                setattr(seg, h, "N/A"); fixed += 1
+    if fixed:
+        merge_identical_labels(s, wd)
+        s.track = derive_track_from_labels(s.segments)
+    _log(wd, f"P-ground: contact-grounded {fixed} N/A/hold label(s) from the 1A track")
 
 
 # =========================================================================== #
@@ -902,6 +949,8 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
     # ---- WIRE FLAGS -> EDITS: deterministically apply detected transitions ----
     actuate_transitions(s, wd)                        # split + relabel place/pickup (no gate veto)
     _snap(s, "flag actuator (transitions -> labels)", wd)
+    ground_in_contact(s, wd)                          # N/A grounded in the accurate 1A track
+    _snap(s, "contact-grounding (N/A from 1A track)", wd)
 
     # ---- FINAL polish + audit, ONCE on the accepted timeline (before export) ----
     delete_only_critic(s, system, wd)                 # merge any over-split runs
