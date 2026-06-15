@@ -1,0 +1,36 @@
+You label BOTH hands for ONE segment of an egocentric two-handed manipulation clip, for robot learning. Apply the named disciplines from your system prompt (FOREARM L/R, ACTING vs SUPPORTING, ANTI-MIRROR, TRACK-GROUNDED ROLE, BURST-DECIDES-ROLE, MIXED-IS-TERMINAL, STILL-NOT-HOLD, COMPLETE-THE-ACTION) — they are not restated here.
+
+=== WHAT YOU SEE ===
+You watch this clip from t=<<OA>>s to t=<<OB>>s at 10 fps (top-right clock = absolute seconds, the time authority). The CORE segment you must label is t=<<A>>s to t=<<B>>s. The moments before <<A>> and after <<B>> are CONTEXT ONLY — use them to tell whether the core action is a fresh start or the continuation/tail of a neighbor, but DO NOT label them. Your labels describe ONLY what happens in the core [<<A>>, <<B>>]. Apply FOREARM L/R (left-edge forearm = left hand) every frame.
+
+Task goal (derived upstream, a hypothesis): <<GOAL>>
+Decided direction (settled upstream — your labels must be consistent with it): <<DIRECTION>>
+Objects: <<INVENTORY>>
+Possession track over this window (a NOISY HINT for which forearm holds what — it is sometimes wrong; trust the video frames over it whenever they disagree): <<TRACK>>
+Per-frame contact-facts hint inside the core (a rough auto-extracted guess of which object each hand touches each 0.1s — use it only when it matches what you SEE; the frames are the authority, not these facts):
+<<CONTACT_FACTS>>
+Decisive rotation/role/colour verdicts inside the core (these ARE reliable for those moments): <<BURSTS>>
+Previous segment's label (continuity, TEXT only): L: <<PREV_LEFT>> | R: <<PREV_RIGHT>>
+Next segment's label (continuity, TEXT only):     L: <<NEXT_LEFT>> | R: <<NEXT_RIGHT>>
+
+=== HOW TO USE THE CONTACT FACTS + OVERLAP ===
+- The contact facts say WHAT each hand holds; you name WHAT IT DOES with it. A hand the facts show as "empty" across the core cannot be given a holding/manipulating verb — it is N/A (or a reach, if a grasp visibly begins).
+- If the core's motion is the SAME continuous action as the previous label and the contact facts show no possession change at <<A>>, you are mid-action — name the ongoing action, do not invent a fresh "pick".
+- If a hand GAINS an object at the core's start (ctx-before frames show it empty, then holding), name the pick and its source. If a hand RELEASES into a destination near the core's end, name the place with its destination.
+
+=== STEPS ===
+1. LEFT hand only across the core frames (use ctx frames + contact facts to settle the edges).
+2. RIGHT hand only across the core frames.
+3. RECONCILE (a transfer needs a giver AND a receiver; one hand may support what the other works).
+4. Run the named checks the system prompt defines.
+
+Each non-N/A label: 2-8 words, ONE action head, "<verb> the <object> [short modifier]". No "then/while/and", no pronouns, never "left hand"/"right hand" inside a label.
+
+NAME THE SPECIFIC ACTION — vague verbs are BANNED. Never use "manipulate", "handle", "work", "interact with", "use", "adjust", or "do something to". State the actual visible motion: hold/steady/brace, thread/screw/twist/turn/tighten/loosen/unscrew, insert/seat, pick up/grab/lift, place/set down/drop/release, push/pull, hand off. The verb must be consistent with the decided direction (assembly → joining verbs like thread/screw-on/insert; disassembly → separating verbs like unscrew/remove/pull-out). If you genuinely cannot tell which motion it is, pick the most specific one the frames support — never fall back to a vague verb.
+
+N/A IS EXPECTED, not a fallback: if a hand is idle this segment — empty, resting, waiting, or out of frame (the in-window contact facts show it empty, or the other hand is doing a one-handed action like a place or pickup) — its label is exactly "N/A". Do NOT manufacture a "hold" for an idle hand. A one-handed place or pickup means the other hand is N/A.
+
+OBJECT NAMES: use ONLY the catalogue identities in Objects above, spelled the same way every segment. When parts are joined, name the one combined unit; do not call the combined unit by a single part's name, and do not rename the same object between segments.
+
+Raw JSON only:
+{"think": "<2-3 sentences: per-hand reading and how the contact facts / overlap settled the edges>", "left": "<phrase or N/A>", "right": "<phrase or N/A>"}

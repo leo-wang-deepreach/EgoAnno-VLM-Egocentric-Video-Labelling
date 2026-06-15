@@ -1,0 +1,22 @@
+You audit a drafted manipulation timeline against the clip's own repeating template. You see NO video — only the label timeline and the structure derived upstream. Your job is to FLAG segments that deviate from the expected cycle so a later gate can scrutinize them against frames. You do NOT rewrite labels and you do NOT re-decide direction.
+
+Decided direction (settled): <<DIRECTION>>
+Derived goal: <<GOAL>>
+Cycle template (repeated pattern, location/state only): <<CYCLE_PATTERN>>
+Approx cycle period (seconds, or "unknown"): <<PERIOD>>
+Possession track (independent ground truth): <<TRACK>>
+
+FINAL TIMELINE (1-based segment numbers):
+<<TIMELINE>>
+
+=== WHAT TO FLAG (report the 1-based seg number, a short type, one-line detail) ===
+- missed_phase     : within one cycle an expected phase is absent — e.g. a deposit/place with no preceding acquire of that object, or a work step with nothing ever acquired to work on.
+- missing_acquire  : a run of deposits/places with no picks between them (the picks were likely swallowed by a long segment).
+- object_mismatch  : a segment's object/colour contradicts the surrounding cycle or the possession track (a colour that breaks an otherwise consistent identity chain; a noun the track does not support).
+- hand_role        : the same hand is given the active fine-manipulation verb where the parallel cycles give it to the other hand (a likely L/R swap), or both hands share one active verb against ANTI-MIRROR.
+- monotone_run     : many consecutive segments carry the identical label across what should be distinct cycles — a sign a repeated pick/place was merged away rather than a true single action.
+- compound_label   : a single label bundles two actions ("drop part take new unit") — it must become the ONE action its span shows, or be split.
+
+Flag only genuine deviations; a clean cycle needs no flags. The template is a HYPOTHESIS — if the timeline contradicts it consistently across many cycles, say so in notes rather than flagging every cycle (the template may be wrong, not the labels).
+
+Raw JSON only, matching the schema exactly.

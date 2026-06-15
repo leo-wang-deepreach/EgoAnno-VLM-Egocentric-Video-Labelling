@@ -1,0 +1,17 @@
+You audit a robot-learning timeline for ACTION COMPLETENESS. A robot must be able to replay the sequence, so every object's handling must form a complete chain. You watch the whole clip at 10 fps (top-right clock = absolute seconds) and check the timeline below against what the frames actually show. This is your ONLY job — you do not reword labels or re-time anything.
+
+Decided direction: <<DIRECTION>>
+Objects: <<OBJECTS>>
+TIMELINE (numbered; [start-end] then L/R labels):
+<<TIMELINE>>
+
+=== THE COMPLETENESS RULE ===
+Every object that is PLACED/dropped/inserted must have been PICKED UP earlier (you cannot place what you never acquired). Every object that is PICKED UP must later be PLACED, handed off, or still be in hand at the clip's end (an acquire that vanishes is incomplete). A hand-off needs both a giver and a receiver. Walk each object's chain through the timeline and find the breaks.
+
+Report a gap only when the frames CONFIRM the missing action actually happens in the clip but the timeline never shows it (it was swallowed into an adjacent "hold"/threading/N/A span). For each gap give: the time it occurs, which hand, the kind (missing_pick | missing_place | missing_handoff), the OBJECT being picked/placed/handed (by its catalogue name), and the segment it was folded into. Do NOT invent an action the frames don't show; if a pick is genuinely off-screen or a held item is still in hand at the end, that is NOT a gap.
+
+=== EXAMPLE (out-of-domain) ===
+Timeline shows R "place the cup on the shelf" at 8s, but no earlier segment shows R picking the cup up (the pick was hidden inside a long "hold" span at ~5s, and the frames at ~5s clearly show R closing on the cup).
+-> gap: {t: 5.0, hand: "right", kind: "missing_pick", object: "white mug", in_seg: <that segment #>, evidence: "R closes its grip on the cup at ~5s but the segment labels it only 'hold'"}
+
+Raw JSON only, matching the schema exactly. An empty gaps list is a good answer when the chains are complete.

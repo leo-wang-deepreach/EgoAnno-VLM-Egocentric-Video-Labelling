@@ -1,0 +1,42 @@
+You build the FACT LAYER for an egocentric two-handed manipulation clip — the ground truth every later stage depends on. You report only what is physically present and what each hand is physically touching, frame by frame. You do NOT name actions, you do NOT guess the task, you do NOT infer any assembly/disassembly direction. Facts only.
+
+You watch a window of this clip sampled at 10 fps (top-right clock = the time authority). Apply FOREARM L/R from your system prompt: forearms enter from the bottom of a first-person top-down view — the LEFT-edge forearm is the LEFT hand, the RIGHT-edge forearm is the RIGHT hand. Re-derive this from the pixels for every frame; never swap when the hands cross.
+
+=== OBJECT CATALOGUE ===
+List every DISTINCT physical object that appears anywhere in this window. Give each a stable, specific identity by visible colour + form (e.g. "blue cylindrical part", "metal ring", "white container"). Keep that exact name for the same object across all frames. A pile of like items is ONE entry named once (e.g. "pile of mixed-colour pieces"); do not invent a colour for a mixed pile. "function" is optional and must be a neutral physical descriptor, never a task role.
+
+=== PER-FRAME CONTACT ===
+For EACH sampled frame output one record with:
+  - t            : the clock time you read off that frame (one decimal second)
+  - left_touching   : ONLY the single object the LEFT hand is grasping or in firm load-bearing contact with this frame, by its catalogue name; or "empty" if the left hand holds nothing; or "out of frame" if the left forearm is not visible. Report the INTERACTED object only — not nearby or background objects.
+  - right_touching  : same for the RIGHT hand
+
+Rules for contact (apply symmetrically to both hands, both directions of any task):
+  - "touching" means a closed grip or clear load-bearing contact. A hand merely hovering, reaching toward, or resting near an object without holding it is "empty".
+  - If a hand holds a combined/joined unit, name that one unit.
+  - Report contact you can SEE. Do not infer that a hand still holds something once it has left the frame — use "out of frame".
+  - Never describe motion, intent, or who is "working" vs "supporting". That is not your job here.
+
+=== "empty" IS A FIRST-CLASS ANSWER (report it often) ===
+A hand is "empty" in any frame where it is NOT closed around an object: open, resting, reaching, mid-release, or just after setting something down. Report "empty" the INSTANT a grip opens — do not keep naming the last-held object once the hand has let go.
+  - When a hand SETS AN OBJECT DOWN (lowers it and opens), it becomes "empty" at that moment, and stays "empty" until it grips something again. Capture this even if the hand soon picks the object back up.
+  - It is completely normal for a hand to be "empty" for long stretches — e.g. while the OTHER hand does the work, or after placing a finished unit on the table. A steadying hand that briefly lets go is "empty" while released.
+  - RED FLAG: a hand reported as holding the SAME object for the entire clip with no "empty" frames is almost always wrong — re-check whether it ever opens, sets the object down, or hands it off, and report those "empty" frames.
+
+=== REPORT WHAT EACH HAND ACTUALLY TOUCHES, FRAME BY FRAME ===
+Report the real grip state every frame — do not smear one object name across the whole window when the truth changes:
+  - When a hand grabs a fresh item from a pile/source, report "empty" during the reach, then the item's name once gripped — even if the new item looks identical to the last one. Repeated fetches each show their own grasp and the brief empty reach between them.
+  - A real RELEASE: a hand SETS its object down on the surface (object stays, hand opens) or HANDS it to the other hand -> "empty" at that instant. Capture set-down and hand-off moments even if brief.
+  - IDENTITY CHANGE: once parts become joined, the held object's NAME becomes the combined unit from then on (e.g. a rod-with-ring unit, not the bare rod); after separation it stops being the unit.
+  - A hand that keeps holding the SAME single object steadily (e.g. bracing a part) is holding it continuously — report it across those frames; a momentary regrip of a still-held object is not a release.
+
+Be accurate, not smooth: a hand bracing one part for a long time AND the other hand fetching item after item are BOTH normal — report each exactly as seen.
+
+=== CANONICAL EXAMPLE (out-of-domain, format only) ===
+Scene: a hand picks a mug off a desk while the other hand rests empty; a pen and a notebook also lie on the desk.
+Correct frame record -> {"t": 4.2, "left_touching": "empty", "right_touching": "white mug"}
+Wrong -> "right_touching": "desk"            (the desk is the surface, not a manipulated object — that is "empty")
+Wrong -> "left_touching": "white mug"        (only the hand actually gripping the mug touches it; the resting hand is "empty")
+One diverse example, not a rulebook: apply the same judgement to whatever objects this clip actually contains.
+
+Output one record per sampled frame, in time order, covering the whole window. Raw JSON only, matching the schema exactly.

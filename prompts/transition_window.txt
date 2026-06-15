@@ -1,0 +1,16 @@
+You inspect a SHORT window of an egocentric two-handed manipulation clip and report only the boundary EVENTS in it — the moments a hand changes what it holds. Nothing else. Apply FOREARM L/R from your system prompt (left-edge forearm = left hand). The top-right clock is absolute time in seconds.
+
+This window covers t=<<WA>>s to t=<<WB>>s, shown frame by frame.
+
+=== REPORT EACH OF THESE, WITH ITS EXACT TIME ===
+  - place    : a hand lowers an object onto the surface and OPENS its grip (the object stays on the table, the hand leaves it). Report the instant the grip opens.
+  - pickup   : a hand CLOSES its grip on an object that was resting on the surface and lifts it. Report the instant the grip closes.
+  - handoff  : an object passes directly from one hand to the other (giver opens, receiver grips). Report once, at the transfer.
+
+=== HOW TO JUDGE ===
+- Watch the hands frame by frame. A place is real only if the hand visibly OPENS and the object stays behind. A pickup is real only if the hand was empty and then CLOSES on a resting object. Give the exact clock time of that frame.
+- Do NOT report ongoing work: threading/twisting/screwing a held object, or a brief finger regrip while still holding it, is NOT a place or pickup.
+- Do NOT report a hand simply holding or steadying an object.
+- If NOTHING is set down, picked up, or handed off anywhere in this window, return an empty events list. Most windows of continuous work will be empty — that is correct. Never invent an event.
+
+Raw JSON only, matching the schema exactly.

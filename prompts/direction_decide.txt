@@ -1,0 +1,37 @@
+You decide the single TASK DIRECTION for a robot-learning manipulation clip AND state the task goal you derived from the evidence. This is your ONLY job: do not label spans, do not merge cuts, do not re-time anything. You are given no stated task on purpose — derive everything from STRUCTURE first, breaking ties with rotation bursts.
+
+You watch whole-clip coverage frames (top-right clock = time authority).
+
+Object catalogue: <<OBJECTS>>
+Cycle template (the repeated pattern, location/state only — no direction baked in): <<CYCLE_PATTERN>>
+Possession track (independent ground truth — which object each forearm engages over time): <<TRACK>>
+Reduced rotation verdicts (decisive bursts only; indeterminate ones already removed): <<BURSTS>>
+Burst direction summary (counts and whether decisive verdicts form contiguous runs): <<BURST_SUMMARY>>
+
+=== DECIDE DIRECTION IN THIS ORDER ===
+
+1. STRUCTURE FIRST. Read the cycle template and the possession track together. If the track shows the SAME contiguous cycle repeating with one stable engage->work->deposit shape throughout (one stable period), this is ONE operation with ONE direction — not alternating. Regularity in the track is strong evidence AGAINST mixed_or_alternating. State the track's period and shape.
+
+2. EXEMPLAR STATE CHANGE. Track one exemplar object through a full cycle: does it start as separate parts and end joined (ASSEMBLY), start joined and end separated into different destinations (DISASSEMBLY / SORTING), or move/portion material without joining or separating part classes (TRANSFER_OR_PORTIONING)? End-state accumulation overrides any narrative impression of "tightening" vs "loosening".
+
+3. PRE-EXISTING PILE GUARD. A pile already present in the first frame proves nothing about direction. Derive direction from the exemplar's state change, never from a t=0 pile. Both directions must be considered symmetrically.
+
+4. ROTATION BURSTS BREAK TIES ONLY. Use the burst summary:
+   - If a majority is clear and runs == 1 (or any opposite run is an isolated size-1 dissenter): direction = the majority. A lone dissenting burst NEVER creates "mixed".
+   - mixed_or_alternating is correct ONLY when decisive verdicts form CONTIGUOUS OPPOSITE RUNS each of size >= 2 (a real block of one direction, then a real block of the other). If so, report the switch time(s).
+   - If no decisive rotation exists, decide from structure (steps 1-2) alone.
+   A single threading burst NEVER outranks a regular repeating cycle. Rotation tells you which way a thread turns at one instant; structure tells you what the whole task is doing.
+
+5. PHASE SWITCH. Only if BOTH structure (the source->output flow visibly reverses mid-clip) AND the burst runs (size >= 2 each) agree on a switch, report phase_switch_sec. Never declare a switch from bursts alone or from one anomalous span.
+
+=== DERIVE THE GOAL ===
+Write one neutral sentence naming what the task accomplishes, consistent with the direction you chose and grounded in the catalogue + track (e.g. "Repeatedly join each <part A> to a <part B> at the center, then set the combined unit aside"). Name objects by their catalogue identity. Do not invent objects or steps not supported by the evidence.
+
+Raw JSON only:
+{
+  "direction": "assembly"|"disassembly"|"transfer_or_portioning"|"mixed_or_alternating"|"other_or_ambiguous",
+  "goal": "<one neutral sentence, evidence-grounded>",
+  "basis": "<one short paragraph: the track's period/shape, the exemplar's before/after state, and how the burst summary was used (majority vs contiguous runs)>",
+  "phase_switch_sec": <number or null>,
+  "recheck_times": [<t>, ...]
+}

@@ -1,0 +1,19 @@
+You are the DELETE-ONLY segmentation critic for a robot-learning annotation. The frames sample the whole clip in order (top-right clock = absolute seconds). The timeline may be slightly OVER-SEGMENTED — one continuous action chopped into fragments. Your ONLY power is to DELETE a boundary so two ADJACENT segments merge back into one action. You can never add a boundary, move a time, or reword a label.
+
+Decided direction: <<DIRECTION>>
+FINAL TIMELINE (numbered; [start-end] then L/R labels):
+<<TIMELINE>>
+
+=== WHEN TO MERGE ===
+Delete a boundary only when the two adjacent segments are ONE continuous action that was split — i.e. the first segment's action is incomplete on its own and simply continues in the next: a brief regrip/readjust mid-manipulation, a reach that is the start of the grasp beside it, a lift that is the same motion as the carry, or two spans the frames show as one uninterrupted motion on the same object. Be most willing on short fragments (<~1s), but merge longer ones too when the frames show one unbroken action.
+
+=== WHEN TO KEEP (never merge these) ===
+Keep the boundary when the two sides are genuinely DIFFERENT actions: one ACQUIRES (pick/grab/lift-from-source) and the other DEPOSITS (place/drop/insert); an object enters/leaves a hand or passes between hands; the working object, part, or destination changes; or the motion visibly stops, reverses, or restarts. A hand going to/from N/A is a real change — keep it. When unsure, KEEP.
+
+=== EXAMPLE (out-of-domain) ===
+Timeline: #4 [6.0-6.4] R: regrip the jar lid | #5 [6.4-9.0] R: twist the jar lid.
+-> merge (delete 6.4): the regrip is mid-twist, one continuous action; keep "after" (the fuller "twist the jar lid").
+Counter: #7 [9.0-9.6] R: place the jar lid | #8 [9.6-11.0] R: pick up a new lid -> KEEP: deposit then acquire are different actions.
+
+For each merge give "delete_t" = the shared boundary time, and "keep" = which label spans the merged action ("before" or "after"). Raw JSON only:
+{"merges": [{"delete_t": <sec>, "keep": "before"|"after", "reason": "<short>"}], "notes": "<one line or 'none'>"}

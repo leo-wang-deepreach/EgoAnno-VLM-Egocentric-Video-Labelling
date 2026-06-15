@@ -1,0 +1,45 @@
+You are the FINAL GATE for a robot-learning annotation pipeline. The frames below sample the ENTIRE clip in chronological order (top-right clock = time authority). You see the whole video at once, so you do exactly TWO jobs: (B) spot-check ONLY the flagged segments against their frames, and (C) merge artificial window-edge cuts. Direction has already been decided by a dedicated upstream stage — you do NOT re-derive it; you only confirm whether the timeline's labels are consistent with it.
+
+Apply the named disciplines from your system prompt (ANTI-MIRROR, MIXED-IS-TERMINAL, TRACK-GROUNDED ROLE, BURST-DECIDES-ROLE, STILL-NOT-HOLD, COMPLETE-THE-ACTION) — they are NOT restated here.
+
+Decided direction (from the direction stage; treat as settled unless a flagged segment's frames flatly contradict it): <<DIRECTION>>
+Purpose hypothesis: <<GOAL>>
+Possession track (independent ground truth): <<TRACK>>
+Reduced rotation/role/color verdicts (decisive bursts only): <<BURSTS>>
+
+FINAL TIMELINE (numbered):
+<<TIMELINE>>
+
+SEGMENTS PRE-FLAGGED FOR REVIEW (these are the ONLY labels you scrutinize — a neighbor-consistency reviewer and deterministic scans judged each suspicious: an object/part/color contradicting the surrounding cycle, a hand-role swap, an action breaking the local flow, a monotone run hiding a missed pick, or a track/label mismatch). Give EACH extra frame-level scrutiny; correct it if the frames disagree; leave it unchanged if it is right:
+<<FLAGGED>>
+
+=== JOB B — SPOT-CHECK FLAGGED SEGMENTS ONLY ===
+Do NOT re-label segments that are not flagged. For each flagged segment, in clock order:
+1. Read its own frames plus the 1-before/1-after neighbor.
+2. Check the forearm assignment against the TRACK (TRACK-GROUNDED ROLE) and any role burst (BURST-DECIDES-ROLE). Swap L/R if the track/burst contradicts the label.
+3. Check hold vs N/A (STILL-NOT-HOLD): a hold needs a visibly gripped object; an empty motionless hand is N/A.
+4. Check the action is not mirrored (ANTI-MIRROR) and the colour is not locked or over-specified (MIXED-IS-TERMINAL; use the colour burst as ground truth).
+5. Check the verb names a single visible action with its endpoint (COMPLETE-THE-ACTION). A label that bundles two actions (e.g. "drop part take new unit") is invalid — replace it with the ONE action its frames actually show; if its frames show two distinct visible actions, do not jam them into one label — instead emit a "split_request" for that segment so an upstream split runs, and leave the existing label.
+6. MISSED ACQUISITION (report only, do not relabel): if a flagged deposit is preceded by manipulation of a NEW object with no acquisition between them, note it in findings so the deterministic gate routes a split — do not invent a pick label.
+
+A correction is a FULL replacement label obeying the system-prompt LABEL FORMAT, or exactly "N/A". Only correct labels the frames contradict; never restyle a consistent label.
+
+=== JOB C — WINDOW-SEAM MERGES ONLY ===
+The edge verifier already snapped or merged every within-cycle boundary at 30fps, so do NOT re-litigate those. Your scope is the SEAMS where two fixed processing windows met — a boundary that splits ONE continuous sub-goal only because the clip was chunked there. List such a boundary time in "merge_at_sec". Only a time lying exactly between two adjacent segments. NEVER merge across a possession change (object enters/leaves a hand, or a hand-to-hand transfer) or a real purpose change — those boundaries are real. Do not merge a long identical-label run into one giant span; if labels repeat across many cycles, that is a missed-pick signal for findings, not a merge.
+
+=== PURPOSE ===
+Give the corrected one-sentence purpose in "purpose_check"; set "purpose_verdict" to "confirmed" if it matches the frames and the decided direction, "corrected" otherwise. Keep the purpose consistent with <<DIRECTION>> — do not silently re-open the direction decision; if a flagged segment truly contradicts the decided direction, say so explicitly in findings and set purpose_verdict to "corrected", but do not flip the whole timeline.
+
+If everything is consistent, return empty corrections and merge lists.
+
+=== OVERALL QUALITY VERDICT — BE A STRICT VERIFIER (drives a bounded re-run) ===
+This trains a robot to REPRODUCE the human's actions, so the timeline must be complete and atomic. You are a STRICT gate: the DEFAULT verdict is "needs_rerun". Set "good" ONLY if you can AFFIRMATIVELY CONFIRM, by watching the frames action by action, that EVERY one of these holds:
+  1. COMPLETE: every distinct action you can see in the frames has its own segment. Walk the clip start to end; for EVERY moment a hand PICKS UP an object, SETS one DOWN/places it, or HANDS one to the other hand, there MUST be a corresponding segment. If any such moment is absorbed into an "ongoing work" segment and is missing from the timeline -> needs_rerun.
+  2. ATOMIC ROLES: in a place/pickup/hand-off segment, the hand that is NOT doing it is labeled N/A (a placing hand places; the other is N/A). If both hands are given active work labels through a visible place/pickup -> needs_rerun.
+  3. NO MERGED ACTIONS: no two clearly-different actions are crammed into one segment (e.g. a screw and a place in one span). NOTE: OVER-segmentation (one continuous action split into several identical-label slivers) is NOT your concern — a delete-only merge critic runs after you and fixes that. Do NOT set needs_rerun just because something looks over-split.
+  4. FRAME-TRUE: every label matches what the frames actually show for that span, and is consistent with the decided direction.
+Judge against the FRAMES, not the timeline's internal tidiness — a timeline can look self-consistent yet be missing real actions. Rerun for MISSING actions, WRONG labels/roles, or merged-distinct-actions — never for harmless over-splitting. When genuinely unsure an action is present, prefer needs_rerun. In "rerun_feedback" name EXACTLY what is missing or wrong, with times — e.g. "a place at ~12.9s and a pickup at ~14s are missing — split them out with the idle hand N/A"; "seg 4 merges a screw and a place — split at ~27.7s". Use "" only when you set "good".
+You may also REQUEST a specific check on demand: set "request_merge_critic": true to have the delete-only merge critic re-run, or "request_completeness": true to re-run the pick/place completeness audit, if you suspect over-segmentation or a missing pick/place chain you can't pin down yourself.
+
+Raw JSON only:
+{"purpose_check": "<one sentence>", "purpose_verdict": "confirmed"|"corrected", "findings": "<one short paragraph: which flagged segments were corrected and why, any missed acquisition noted, whether labels were consistent with the decided direction>", "merge_at_sec": [<number>, ...], "split_request": [<seg#>, ...], "corrections": [{"seg": <1-based number>, "hand": "left"|"right", "label": "<replacement>"}], "quality_verdict": "good"|"needs_rerun", "rerun_feedback": "<short concrete fix instructions, or empty>", "request_merge_critic": true|false, "request_completeness": true|false}

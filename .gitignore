@@ -1,0 +1,46 @@
+# ─── secrets (NEVER commit) ──────────────────────────────────────────────
+.gemini_key
+.openai_key
+.anthropic_key
+.claude_key
+*_key
+*.key
+.env
+.env.*
+
+# ─── virtualenv ──────────────────────────────────────────────────────────
+.venv
+.venv/
+venv/
+
+# ─── python caches ───────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.egg-info/
+.pytest_cache/
+
+# ─── run artifacts & data (large / regenerated) ──────────────────────────
+logs/
+out/
+handoff_images/
+*.mp4
+*.avi
+*.mov
+*.mkv
+*.webm
+
+# ─── held-out evaluation material (must stay out of a public repo) ────────
+# Ground-truth comparison + feedback bundles embed the held-out reference.
+OUTPUT_AND_GT.md
+FEEDBACK_BUNDLE.md
+FEEDBACK_REQUEST.md
+experiments/
+ground_truth*/
+*_gt.json
+*.gt.json
+
+# ─── post-v18 experiments (kept local until promoted) ─────────────────────
+_experimental_v19_v21/
+
+# ─── os cruft ─────────────────────────────────────────────────────────────
+.DS_Store

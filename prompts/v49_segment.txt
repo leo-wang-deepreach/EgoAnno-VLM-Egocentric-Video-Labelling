@@ -1,0 +1,39 @@
+Watch t=<<A>>s to t=<<B>>s. First-person two-handed tabletop manipulation. Use the TOP-RIGHT clock only to report times, to one decimal.
+
+Your ONLY job is SEGMENTATION: output cut times where one complete visible manipulation sub-goal ends and the next begins. Do NOT label the spans.
+
+Task: <<GOAL>>
+Objects (name: function; how handled): <<INVENTORY>>
+Possession track — which object each forearm is interacting with over time (cut when a forearm's contacted object CHANGES; a noisy hint, trust the frames over it): <<TRACK>>
+Findings from close-up frame bursts (ground truth for those moments): <<BURSTS>>
+
+OVERRIDE for this dataset (takes precedence over rules 10-11 below): the FIRST acquisition (the initial pick that starts the clip) and the FINAL deposit (the ending place/release) ARE their own segments — always put a cut just after the initial pick and just before the final place. Likewise, each place-down and pick-up where a hand visibly opens or closes its grip on the WORKED object is its own segment. Do not fold these into the neighbouring action.
+
+Rules:
+1. First watch for the repeated visual cycle, if any. In "cycle_pattern", write only a location/state pattern, not action labels, e.g. "source pile -> center work area -> box".
+2. Use the cycle pattern as a guide only. Visible off-cycle motions such as table/pile management, clearing, recovery, failed attempts, dropped items, or tool/object repositioning get their own cuts when they form complete visible sub-goals.
+3. A valid segment contains one complete, labelable visible sub-goal or task phase — one ATOMIC action (a single verb on a single object-state change), NEVER "a whole task got completed". When the hand switches from one contacted tool/object to a different tool/object or to bare fingers, that is a purpose change — cut there. Cut only when the visible purpose changes: new object, new destination, new task phase, or fundamentally different hand/object motion.
+4. Do not cut inside continuous motion on the same object toward the same goal, even if it crosses clock seconds. Regrips, small corrections, repeated tries without completed release, and continuous handling of a handful/group stay in one segment.
+4b. Continuous handling vs discrete micro-cycles: do NOT create repeated pick/release cycles for continuous handling of the same handful, pile, cluster, flexible group or container mouth when the hand stays in contact or immediately recontacts without a visible completed let-go. A discrete release segment requires VISIBLE completion (object no longer hand-controlled; the releasing hand open/empty or clearly separated). If sampled "release" moments look like the "pick/handle" moments, collapse into one continuous-action segment (gather/tuck/arrange/feed/pack).
+5. Phase ontology for source->work->destination cycles: source acquisition / transport / active manipulation / post-placement adjustment / release-deposit. Cut between phases only when their visible goals differ; acquisition is not insertion, pressing is not picking, and transport is not target work.
+6. Multi-cycle anti-swallowing guard: audit every proposed segment by sampling start, 25%, 50%, 75% and end (for spans over 12s, also every ~4-6s). A segment is INVALID if it contains more than one completed cycle of acquire -> work -> finish -> destination move/release -> next acquire. Split triggers: a completed release/deposit followed by regrasping another item; hands leave the work area for a source/destination and return with a new item; one finished part deposited then a different part acquired; separation/joining completes then the next acquisition begins. Never let one segment bridge deposit->regrasp->new manipulation merely because the same verb repeats; if unsure whether a release completed, request a burst instead of swallowing the next cycle. Also split when a segment alternates distinct long work phases (>~20s each).
+7. Separation->destination cycles: do not start the drop/sort/place segment while hands are still together at the central work area twisting, pinching, or finishing separation. Start it at the first visible transition to destination-directed transport, when separated item(s) move outward/downward toward container openings.
+8. The destination-transfer/drop segment is the destination-directed transport plus release. Never pad it backward into manipulation to make it longer.
+8b. Release visibility requirement: never infer a release from small hand motion, rhythmic repetition or expected task structure — if release completion is not visible, keep it inside the continuous span or request a burst.
+9. A release/drop is a separate segment only when it is the visible goal of a destination-transfer/drop phase or is detached from carrying/placing by a pause, independent let-go, separate fall, slip, impact, or recovery.
+10. Routine contact-state changes are not standalone segments: final release of a completed object belongs with the preceding action, and initial reach/grasp of the next object belongs with the following action.
+11. In an end-of-cycle transition, use at most ONE boundary between the completed-object phase and the next raw-part acquisition phase; do not create separate sub-second release and grasp fragments.
+12. Be conservative. Typical tabletop sub-actions are about 2-8s.
+13. Protected short exception: in repetitive sorting/binning tasks, a destination-transfer/drop phase may be 0.4-1.5s when it visibly contains movement toward a destination container and/or release into it. Keep it short rather than moving its start earlier.
+14. Other sub-second cuts are only for isolated quick events such as a slip, impact, sudden drop, bounce, snap, collision, or object falling.
+15. The clock is NOT a metronome: never cut on a whole second unless the hand/object state visibly changes there.
+16. Before answering, audit your cuts. Merge fragments if they split one continuous goal, if the median duration is under 2.0s without protected short transfers, if many spans are under 1.0s, if there are more than 3 cuts in any 3s window, or if cuts cluster on integer seconds without visible state changes.
+17. About 85s of repetitive assembly usually has roughly 12-30 segments, not 40+; however, never merge across repeated completed cycles merely to satisfy this prior.
+18. Merge short fragments only when they share the same object, same destination, and same visible goal.
+19. Boundaries must be strictly increasing and strictly inside (<<A>>, <<B>>).
+19a. Insertion-vs-extraction ambiguity: when a manipulation span involves a part overlapping/inside another (tube, barrel, socket, housing) and the motion direction is unclear at this frame rate, request a burst asking: "across this span, does the overlap between <part> and <counterpart> increase (insertion) or decrease (extraction)?" Burst findings become ground truth for labeling that span.
+19b. For repetitive separation/sorting tasks, if the first release/drop phase determines hand-part or destination mapping and the part identity is hard to see at this frame rate, request a burst asking: which forearm releases which separated part class into which destination?
+20. If a needed cut depends on motion too fine to see, put that time and the exact question in "need_burst".
+
+Raw JSON only:
+{"cycle_pattern": "<one line>", "boundaries": [<number>, ...], "need_burst": [{"t": <number>, "question": "<what to check>"}]}
