@@ -53,6 +53,7 @@ class ClipState:
     objects: list[dict] = field(default_factory=list)     # {name, colour, function}
     contact_frames: list[dict] = field(default_factory=list)  # 10fps per-frame facts
     track: dict = field(default_factory=lambda: {"left": [], "right": []})  # intervals
+    contact_intervals: dict = field(default_factory=lambda: {"left": [], "right": []})  # RAW 1A objects (never overwritten)
     phase_boundaries: list[float] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)   # {t,hand,object,kind}
 

@@ -222,6 +222,7 @@ def export_episode(state, out_path: str, apply_overrides: bool = False) -> dict:
         "left_timeline": _derive_lane(segs, "left"),
         "right_timeline": _derive_lane(segs, "right"),
         "_track": state.track,
+        "_contact_track": state.contact_intervals,   # RAW 1A objects (no actions)
         "_bursts_reduced": state.bursts_reduced,
         "_direction_burst_summary": state.direction_burst_summary,
         "_flags": [{"seg": f.seg + 1, "type": f.type, "raised_by": f.raised_by,

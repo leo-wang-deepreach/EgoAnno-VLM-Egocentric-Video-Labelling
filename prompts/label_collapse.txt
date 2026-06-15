@@ -12,6 +12,8 @@ RELIABLE per-hand possession over time (the 1A ground truth — which object eac
 DETECTED TRANSITIONS (a dense frame scan — strong evidence of the brief boundary events; honor them):
 <<TRANSITIONS>>
 
+REQUIRED CUTS — you MUST place a segment boundary at EACH of these times (a real place/pickup/throw happens there; it can never be inside a segment): <<REQUIRED_CUTS>>
+
 Decisive rotation/role/colour bursts (reliable for those moments):
 <<BURSTS>>
 

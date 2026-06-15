@@ -167,20 +167,42 @@ def _apply_timeline(s: ClipState, segs_raw, prov: str, wd: Path, label: str) -> 
     return True
 
 
+def _enforce_cuts(s: ClipState, cut_times: list[float], wd: Path):
+    """A detected transition may NEVER be swallowed: split any segment that bridges a
+    cut time. Structural only (no hardcoded verbs) — the split piece inherits the parent
+    label and the gate/verifier relabel it from frames. Guarantees no mega-segment."""
+    changed = 0
+    for t in cut_times:
+        for i, g in enumerate(s.segments):
+            if g.start + 0.25 < t < g.end - 0.25:        # t well inside -> split there
+                new = Segment(start=round(t, 2), end=g.end, left=g.left, right=g.right)
+                new.boundary_provenance = "transition_cut"
+                g.end = round(t, 2)
+                s.segments.insert(i + 1, new)
+                changed += 1
+                break
+    if changed:
+        s.track = derive_track_from_labels(s.segments)
+        _log(wd, f"P4 enforce: split {changed} swallowed transition(s) at {cut_times}")
+
+
 def label_and_collapse(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
-    """STEP 4 (bottom-up): read the reliable dense facts (possession + transitions +
-    bursts + direction) and watch the whole clip at 10fps, producing the COLLAPSED
-    per-hand action timeline in one pass — cut where the action changes, collapse steady
-    runs. Replaces v49 cut-then-label."""
+    """STEP 4: watch the clip at 10fps + the reliable dense facts, and lay out the per-hand
+    action timeline — cut at EVERY action change, collapse only truly-steady runs. Detected
+    transitions are REQUIRED cuts (a transition is never swallowed)."""
+    cut_times = sorted({round(float(e["t"]), 2) for e in s.transitions
+                        if e.get("t") is not None and 0.3 < float(e["t"]) < s.duration - 0.3})
     prompt = _p("label_collapse.txt", B=round(s.duration, 1),
                 DIRECTION=s.direction or "(unknown)", GOAL=s.goal or "(unknown)",
                 INVENTORY=s.objects_line(), CONTACT=_contact_summary(s),
                 TRANSITIONS=_transitions_text(s),
+                REQUIRED_CUTS=(", ".join(f"{t:.1f}s" for t in cut_times) or "(none)"),
                 BURSTS="\n".join(s.bursts_reduced) or "(none)")
     r = gv.watch(prompt, system, SC.TIMELINE, a=0.0, b=s.duration,
                  fps=FPS_LABEL, max_tokens=8000)
     _apply_timeline(s, r.get("segments"), "collapse", wd, "P4 label+collapse")
-    _log(wd, f"P4 label+collapse -> {len(s.segments)} segments")
+    _enforce_cuts(s, cut_times, wd)                       # GUARANTEE the transition cuts
+    _log(wd, f"P4 label+collapse -> {len(s.segments)} segments (transitions enforced)")
 
 
 def refine_timeline(s: ClipState, system: str, wd: Path):
@@ -262,6 +284,7 @@ def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     s.objects = list(objs.values())
     s.contact_frames = frames
     s.track = build_track(frames)
+    s.contact_intervals = {h: [dict(iv) for iv in s.track[h]] for h in ("left", "right")}
     nL, nR = len(s.track["left"]), len(s.track["right"])
     _log(wd, f"P1a -> {len(s.objects)} objects, {len(frames)} contact frames, "
             f"track L={nL} R={nR} intervals")

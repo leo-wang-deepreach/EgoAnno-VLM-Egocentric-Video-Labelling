@@ -243,7 +243,7 @@ function buildPanels(){
     objs.length+' objects · '+cf.length+' frames',
     `<div class="kv"><b>objects:</b> ${objs.map(o=>`<span class="chip">${esc(o.name)}${o.colour?' ('+esc(o.colour)+')':''}</span>`).join('')}</div>
      <div style="margin-top:8px"><b class="kv">per-frame facts (fg / bg / contact — ALL ${cf.length} frames):</b>${cfTbl}</div>
-     <div style="margin-top:8px">${trackTbl(tr)}</div>`);
+     <div style="margin-top:8px"><b class="kv">possession (RAW 1A objects, no actions):</b>${trackTbl(EP._contact_track||tr)}</div>`);
   // STEP 1c — transitions
   html+=sect('Step 1c · transitions (place/pickup/handoff)',trans.length+' events',
     trans.length?'<table>'+trans.map(e=>`<tr><td class="t">${f1(e.t)}</td><td>${esc(e.hand)} · <b>${esc(e.kind)}</b> · ${esc(e.object||'')}</td></tr>`).join('')+'</table>':'<div class="empty">none detected</div>');
