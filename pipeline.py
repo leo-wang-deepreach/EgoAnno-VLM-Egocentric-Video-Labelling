@@ -10,7 +10,10 @@ writes back. Spine = the 10fps object+hand-contact track (the ground truth).
   P3  direction    direction_decide (Gemini 10fps whole) — also derives the goal
   P4  segment+label v49_segment (Gemini 10fps; sole cut authority) -> per-seg label
                     (Gemini native 10fps) -> merge -> seg_reconcile -> verifiers [<=2 passes]
-  P5  gate+export  gate (Claude opus-4-8 2fps whole) -> deterministic QA -> export
+  P5  gate+export  gate (Claude opus-4-8 10fps whole) -> deterministic QA -> export
+  P6  fresh-eye    opus reviews clip w/ labels overlaid (10fps), context-free relabel
+NOTE: every step is fed 10fps frames (contact/direction/segment/label/gate/fresh-eye);
+only the brief-event scans — transition windows + rotation bursts — use 30fps.
 """
 from __future__ import annotations
 
@@ -37,9 +40,9 @@ FPS_TRANSITION = 10.0     # dense whole-clip read to catch brief place/pickup/ha
 FPS_DIRECTION = 10.0      # user override: dense whole-clip read for direction
 FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visible
 FPS_LABEL = 10.0          # per-segment NATIVE labeling / focused refine
-FPS_EDGE = 30.0
-FPS_GATE = 2.0
-FPS_FRESH = 4.0           # frames for the context-free fresh-eye overlay review
+FPS_EDGE = 30.0           # transition scan + bursts stay 30fps (brief events need it)
+FPS_GATE = 10.0           # gate sees the clip at 10fps (was 2) — denser, capped below
+FPS_FRESH = 10.0          # fresh-eye overlay review at 10fps (was 4)
 CONTACT_WIN = 20.0        # seconds per 10fps contact-track window
 EDGE_HALF = 0.6           # edge verifier half-window
 LABEL_CTX = 1.0           # neighbor overlap for the labeler
@@ -505,7 +508,7 @@ def delete_only_critic(s: ClipState, system: str, wd: Path):
         return
     s.ran.add("merge_critic")
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=90)
+                             ctx=0.0, cap_frames=100)
     r = claude_call(_p("merge_critic.txt", DIRECTION=s.direction,
                        TIMELINE=s.timeline_text()),
                     frames, system, SC.MERGE_CRITIC, model=CLAUDE_GATE)
@@ -645,7 +648,7 @@ def phase4(s: ClipState, gv: GeminiVideo, gframes_pro: GeminiFrames,
 # =========================================================================== #
 def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=90)
+                             ctx=0.0, cap_frames=100)
     flagged = s.flags_text()
     r = claude_call(_p("opus_final.txt", DIRECTION=s.direction, GOAL=s.goal,
                        TRACK=s.track_lines(),
@@ -711,7 +714,7 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
     if not s.segments:
         return
     frames = render_labeled(s.clocked, s.segments, FPS_FRESH, str(wd),
-                            max_side=720, cap_frames=80)
+                            max_side=720, cap_frames=100)
     if not frames:
         return
     try:
