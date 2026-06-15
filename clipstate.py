@@ -71,6 +71,7 @@ class ClipState:
     segments: list[Segment] = field(default_factory=list)
     flags: list[Flag] = field(default_factory=list)
     analysis_report: str = ""                              # code-generated advisory facts
+    fresh_eye_note: str = ""                               # what the fresh-eye pass changed
 
     # --- run-once guards for on-demand critics (merge_critic / completeness) ---
     ran: set = field(default_factory=set)

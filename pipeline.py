@@ -708,7 +708,9 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
                       str(seg.get("left") or "N/A"), str(seg.get("right") or "N/A")))
     clean.sort()
     if len(clean) < 1 or (len(clean) == 1 and s.duration > 6):
-        _log(wd, f"P6 fresh-eye: rejected degenerate rewrite ({len(clean)} segs), kept timeline")
+        s.fresh_eye_note = (f"rejected degenerate rewrite ({len(clean)} segs) — kept "
+                            f"timeline. notes: {str(r.get('notes',''))[:120]}")
+        _log(wd, f"P6 fresh-eye: {s.fresh_eye_note}")
         return
     rebuilt = []
     for (a, b, lft, rgt) in clean:
@@ -718,8 +720,9 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
     n0 = len(s.segments)
     s.segments = rebuilt
     s.track = derive_track_from_labels(s.segments)
-    _log(wd, f"P6 fresh-eye: reads_correctly={r.get('reads_correctly')}; "
-            f"{n0} -> {len(rebuilt)} segs | {str(r.get('notes',''))[:90]}")
+    s.fresh_eye_note = (f"reads_correctly={r.get('reads_correctly')}; {n0} -> "
+                        f"{len(rebuilt)} segs. {str(r.get('notes',''))[:160]}")
+    _log(wd, f"P6 fresh-eye: {s.fresh_eye_note}")
 
 
 # =========================================================================== #

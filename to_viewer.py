@@ -1,17 +1,19 @@
 #!/usr/bin/env python3
-"""to_viewer.py — publish a facts-first episode into the existing egoanno viewer.
+"""to_viewer.py — publish a facts-first episode into the egoanno viewer, VERSION-AWARE.
 
-The viewer's manifest builder pairs each episode JSON with a source video by the
-JSON filename stem, and renders `subtasks` + per-hand lanes. This adapter takes a
-facts-first episode (old or new export shape) and writes a legacy-shaped JSON named
-<video_stem>.json into out/episodes_factsfirst/, then rebuilds the manifest.
+Each episode is published as `<clip>__<ver>.json` so multiple versions of the same clip
+coexist and the dashboard can compare them (v18 vs v19 vs v20…). The version is inferred
+from the episode's parent dir (out/v20 -> "v20", out/batch -> "v18b") or an explicit
+--ver. The exact clocked video the run saw (ep["_clocked"]) is copied to a served path.
 
-  python to_viewer.py out/76a67a82_v2.json [--rebuild]
+  python to_viewer.py out/v20/76a67a82.json            # ver inferred = "v20"
+  python to_viewer.py out/batch/X.json --ver v18b
 """
 from __future__ import annotations
 
 import argparse
 import json
+import re
 import shutil
 import subprocess
 import sys
@@ -23,51 +25,70 @@ VIDEO_DIRS = ["videos", "not_for_testing_videos", "not_for_testing_videos_2",
               "not_for_testing_videos_3", "not_for_testing_videos_4"]
 
 
-def find_video(stem: str) -> str | None:
-    """Prefer the CLOCKED video the pipeline actually saw (burned-in µs clock) so the
-    viewer's timeline lines up with the timestamps; copy it to a served path. Fall
-    back to the 720p proxy, then the raw source."""
-    # 1. clocked video from the most recent run workdir (workdirs are named by the
-    # short clip id, e.g. logs/76a67a82_v4/clocked.mp4)
-    short = stem.split("-")[0]
-    cand = sorted(list((EGO / "factsfirst" / "logs").glob(f"{short}*/clocked.mp4"))
-                  + list((EGO / "factsfirst" / "logs").glob(f"*{stem}*/clocked.mp4")),
-                  key=lambda p: p.stat().st_mtime, reverse=True)
-    if cand:
-        dst = OUTDIR / f"{stem}.clocked.mp4"
-        if (not dst.exists()) or dst.stat().st_mtime < cand[0].stat().st_mtime:
-            shutil.copy2(cand[0], dst)
-        return f"/out/episodes_factsfirst/{stem}.clocked.mp4"
-    # 2. proxy / source
-    for d in VIDEO_DIRS:
-        if (EGO / d / f"{stem}.mp4").exists():
-            px = EGO / "out" / "proxies" / f"{d}_{stem}.mp4"
-            return f"/out/proxies/{d}_{stem}.mp4" if px.exists() else f"/{d}/{stem}.mp4"
+def _infer_ver(ep_path: Path) -> str:
+    parent = ep_path.parent.name
+    if parent == "batch":
+        return "v18b"
+    if re.fullmatch(r"v\d+\w*", parent):               # out/v19, out/v20
+        return parent
+    m = re.search(r"_(v\d+\w*)$", ep_path.stem)         # out/76a67a82_v17.json
+    if m:
+        return m.group(1)
+    return "v?"
+
+
+def _copy_clocked(key: str, clocked_src: str | None) -> str | None:
+    if clocked_src and Path(clocked_src).exists():
+        dst = OUTDIR / f"{key}.clocked.mp4"
+        if (not dst.exists()) or dst.stat().st_mtime < Path(clocked_src).stat().st_mtime:
+            shutil.copy2(clocked_src, dst)
+        return f"/out/episodes_factsfirst/{key}.clocked.mp4"
     return None
 
 
+def _video_for(key: str, stem: str) -> str:
+    """Served video path for a published key: prefer the copied per-version clocked
+    video, else any clocked workdir for this clip, else proxy/source."""
+    dst = OUTDIR / f"{key}.clocked.mp4"
+    if dst.exists():
+        return f"/out/episodes_factsfirst/{key}.clocked.mp4"
+    short = stem.split("-")[0]
+    cand = sorted((EGO / "factsfirst" / "logs").glob(f"{short}*/clocked.mp4"),
+                  key=lambda p: p.stat().st_mtime, reverse=True)
+    if cand:
+        shutil.copy2(cand[0], dst)
+        return f"/out/episodes_factsfirst/{key}.clocked.mp4"
+    for d in VIDEO_DIRS:
+        if (EGO / d / f"{stem}.mp4").exists():
+            return f"/{d}/{stem}.mp4"
+    return ""
+
+
 def write_factsfirst_manifest():
-    """Scan out/episodes_factsfirst and write viewer/factsfirst_manifest.json so the
-    dashboard can list clips. Paths are root-absolute (served from the egoanno root)."""
-    clips = []
+    """Scan out/episodes_factsfirst and write viewer/factsfirst_manifest.json grouped by
+    clip, each with its versions sorted, so the dashboard offers a version selector."""
+    groups: dict[str, list] = {}
     for ep_path in sorted(OUTDIR.glob("*.json")):
-        try:
-            ep = json.loads(ep_path.read_text())
-        except Exception:
-            continue
-        stem = ep_path.stem
-        clips.append({"clip": stem.split("-")[0] + "…",
-                      "stem": stem,
-                      "episode": f"/out/episodes_factsfirst/{stem}.json",
-                      "video": find_video(stem) or ""})
+        key = ep_path.stem
+        if "__" in key:
+            stem, ver = key.rsplit("__", 1)
+        else:
+            stem, ver = key, "v?"
+        groups.setdefault(stem, []).append({
+            "ver": ver,
+            "episode": f"/out/episodes_factsfirst/{key}.json",
+            "video": _video_for(key, stem)})
+    clips = []
+    for stem, vers in sorted(groups.items()):
+        vers.sort(key=lambda v: v["ver"])
+        clips.append({"clip": stem.split("-")[0] + "…", "stem": stem, "versions": vers})
     out = EGO / "viewer" / "factsfirst_manifest.json"
     out.write_text(json.dumps({"clips": clips}, ensure_ascii=False, indent=2))
-    print(f"factsfirst manifest -> {out} ({len(clips)} clips)")
+    nver = sum(len(c["versions"]) for c in clips)
+    print(f"factsfirst manifest -> {out} ({len(clips)} clips, {nver} versions)")
 
 
 def _lane(segs, hand):
-    """Per-hand lane in the format build_viewer_manifest expects
-    ({start_sec, end_sec, action, needs_review}); it converts to s/e/a/rv itself."""
     lane = []
     for s in segs:
         a = s.get(hand) or "N/A"
@@ -96,7 +117,7 @@ def to_legacy(ep: dict) -> dict:
         "instruction": ep.get("goal", ""),
         "environment": ep.get("environment") or {"category": ""},
         "meta": ep.get("meta") or {"duration_sec": dur,
-                                   "model": "facts-first (gemini+gpt+claude)"},
+                                   "model": "facts-first"},
         "subtasks": subtasks,
         "left_timeline": _lane(segs, "left"),
         "right_timeline": _lane(segs, "right"),
@@ -110,15 +131,20 @@ def to_legacy(ep: dict) -> dict:
 def main():
     ap = argparse.ArgumentParser()
     ap.add_argument("episode")
+    ap.add_argument("--ver", default="")
     ap.add_argument("--rebuild", action="store_true", default=True)
     args = ap.parse_args()
-    ep = json.loads(Path(args.episode).read_text())
-    stem = ep.get("clip") or Path(args.episode).stem
+    ep_path = Path(args.episode)
+    ep = json.loads(ep_path.read_text())
+    stem = ep.get("clip") or ep_path.stem
+    ver = args.ver or _infer_ver(ep_path)
+    key = f"{stem}__{ver}"
     OUTDIR.mkdir(parents=True, exist_ok=True)
-    dst = OUTDIR / f"{stem}.json"
+    _copy_clocked(key, ep.get("_clocked"))
+    dst = OUTDIR / f"{key}.json"
     dst.write_text(json.dumps(to_legacy(ep), ensure_ascii=False, indent=2))
-    print(f"published -> {dst}")
-    write_factsfirst_manifest()                  # for the dedicated facts-first dashboard
+    print(f"published -> {dst} (ver {ver})")
+    write_factsfirst_manifest()
     if args.rebuild:
         r = subprocess.run([sys.executable, "build_viewer_manifest.py"], cwd=EGO,
                            capture_output=True, text=True)

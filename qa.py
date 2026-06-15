@@ -231,6 +231,9 @@ def export_episode(state, out_path: str, apply_overrides: bool = False) -> dict:
         "_qa": {"violations": qa},                 # viewer reads _qa.violations
         "_gate_findings": state.gate_findings,
         "_purpose_verdict": state.purpose_verdict,
+        "_analysis_report": state.analysis_report,  # code-generated advisory analysis
+        "_fresh_eye": state.fresh_eye_note,          # what the fresh-eye pass changed
+        "_clocked": state.clocked,                  # exact clocked video this run saw
         "override_applied": False,
     }
     if apply_overrides:
