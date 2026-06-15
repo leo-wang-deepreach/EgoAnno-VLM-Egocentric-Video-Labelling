@@ -41,8 +41,8 @@ FPS_DIRECTION = 10.0      # user override: dense whole-clip read for direction
 FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visible
 FPS_LABEL = 10.0          # per-segment NATIVE labeling / focused refine
 FPS_EDGE = 30.0           # transition scan + bursts stay 30fps (brief events need it)
-FPS_GATE = 10.0           # gate sees the clip at 10fps (was 2) — denser, capped below
-FPS_FRESH = 10.0          # fresh-eye overlay review at 10fps (was 4)
+FPS_GATE = 10.0           # gate at 10fps; cap 300 frames (opus-4-8 allows 600/req, 32MB)
+FPS_FRESH = 10.0          # fresh-eye at 10fps; cap 300 frames (true 10fps for <=30s clips)
 CONTACT_WIN = 20.0        # seconds per 10fps contact-track window
 EDGE_HALF = 0.6           # edge verifier half-window
 LABEL_CTX = 1.0           # neighbor overlap for the labeler
@@ -508,7 +508,7 @@ def delete_only_critic(s: ClipState, system: str, wd: Path):
         return
     s.ran.add("merge_critic")
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=100)
+                             ctx=0.0, cap_frames=300)
     r = claude_call(_p("merge_critic.txt", DIRECTION=s.direction,
                        TIMELINE=s.timeline_text()),
                     frames, system, SC.MERGE_CRITIC, model=CLAUDE_GATE)
@@ -648,7 +648,7 @@ def phase4(s: ClipState, gv: GeminiVideo, gframes_pro: GeminiFrames,
 # =========================================================================== #
 def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=100)
+                             ctx=0.0, cap_frames=300)
     flagged = s.flags_text()
     r = claude_call(_p("opus_final.txt", DIRECTION=s.direction, GOAL=s.goal,
                        TRACK=s.track_lines(),
@@ -714,7 +714,7 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
     if not s.segments:
         return
     frames = render_labeled(s.clocked, s.segments, FPS_FRESH, str(wd),
-                            max_side=720, cap_frames=100)
+                            max_side=720, cap_frames=300)
     if not frames:
         return
     try:
