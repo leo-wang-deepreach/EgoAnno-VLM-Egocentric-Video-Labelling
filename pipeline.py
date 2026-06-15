@@ -10,10 +10,7 @@ writes back. Spine = the 10fps object+hand-contact track (the ground truth).
   P3  direction    direction_decide (Gemini 10fps whole) — also derives the goal
   P4  segment+label v49_segment (Gemini 10fps; sole cut authority) -> per-seg label
                     (Gemini native 10fps) -> merge -> seg_reconcile -> verifiers [<=2 passes]
-  P5  gate+export  gate (Claude opus-4-8 10fps whole) -> deterministic QA -> export
-  P6  fresh-eye    opus reviews clip w/ labels overlaid (10fps), context-free relabel
-NOTE: every step is fed 10fps frames (contact/direction/segment/label/gate/fresh-eye);
-only the brief-event scans — transition windows + rotation bursts — use 30fps.
+  P5  gate+export  gate (Claude opus-4-8 2fps whole) -> deterministic QA -> export
 """
 from __future__ import annotations
 
@@ -40,9 +37,9 @@ FPS_TRANSITION = 10.0     # dense whole-clip read to catch brief place/pickup/ha
 FPS_DIRECTION = 10.0      # user override: dense whole-clip read for direction
 FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visible
 FPS_LABEL = 10.0          # per-segment NATIVE labeling / focused refine
-FPS_EDGE = 30.0           # transition scan + bursts stay 30fps (brief events need it)
-FPS_GATE = 10.0           # gate at 10fps; cap 600 frames, res auto-scaled to fit 32MB/req
-FPS_FRESH = 10.0          # fresh-eye at 10fps; cap 600 frames, res auto-scaled to fit 32MB
+FPS_EDGE = 30.0
+FPS_GATE = 2.0
+FPS_FRESH = 4.0           # frames for the context-free fresh-eye overlay review
 CONTACT_WIN = 20.0        # seconds per 10fps contact-track window
 EDGE_HALF = 0.6           # edge verifier half-window
 LABEL_CTX = 1.0           # neighbor overlap for the labeler
@@ -100,16 +97,16 @@ def _parallel(fn, items, levels=(8, 6, 4), wd: Path | None = None, tag: str = ""
     return [results.get(i) for i in range(len(items))]
 
 
-def _safe_side(duration: float, fps: float, cap: int = 600, base: int = 720) -> int:
-    """Pick a per-frame max pixel side so a whole-clip strip of up to `cap` frames stays
-    under the Messages API 32MB request limit (after base64 ~+37%). ~220 frames of 720px
-    JPEG fit; beyond that we shrink the frames (sqrt scaling) rather than drop the cap —
-    so a 7-minute clip sends all 600 frames at lower resolution instead of 413-failing."""
-    n = min(int(fps * duration) + 1, cap)
-    fit = 220                                   # 720px frames that fit under ~30MB base64
-    if n <= fit:
-        return base
-    return max(384, int(base * (fit / n) ** 0.5))
+def _snap(s: ClipState, stage: str, wd: Path | None = None):
+    """Record the full timeline after a transform, so the dashboard can show the label
+    EVOLVE stage by stage and the user can see exactly which step changed/broke it."""
+    segs = [{"start_sec": round(x.start, 2), "end_sec": round(x.end, 2),
+             "left": x.left, "right": x.right, "prov": x.boundary_provenance}
+            for x in s.segments]
+    s.stage_snapshots.append({"stage": stage, "n": len(segs), "segs": segs})
+    if wd is not None:
+        rows = " | ".join(f"#{i+1} {x['left']}/{x['right']}" for i, x in enumerate(segs))
+        _log(wd, f"TRACE [{stage}] {len(segs)} segs: {rows}")
 
 
 # =========================================================================== #
@@ -413,18 +410,20 @@ def label_segments(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
         seg = s.segments[i]
         oa, ob = max(0.0, seg.start - LABEL_CTX), min(s.duration, seg.end + LABEL_CTX)
         prev, nxt = _neighbors(s.segments, i)
+        facts = s.contact_facts_in(seg.start, seg.end)
+        track = s.track_lines(seg.start, seg.end)
+        bursts = "\n".join(s.bursts_in(seg.start, seg.end)) or "(none in window)"
         prompt = _p("video_label.txt",
                     OA=round(oa, 1), OB=round(ob, 1), A=round(seg.start, 1),
                     B=round(seg.end, 1), GOAL=s.goal, DIRECTION=s.direction,
-                    INVENTORY=s.objects_line(),
-                    TRACK=s.track_lines(seg.start, seg.end),
-                    CONTACT_FACTS=s.contact_facts_in(seg.start, seg.end),
-                    BURSTS="\n".join(s.bursts_in(seg.start, seg.end)) or "(none in window)",
+                    INVENTORY=s.objects_line(), TRACK=track, CONTACT_FACTS=facts,
+                    BURSTS=bursts,
                     PREV_LEFT=(prev.left if prev else "(start)"),
                     PREV_RIGHT=(prev.right if prev else "(start)"),
                     NEXT_LEFT=(nxt.left if nxt else "(end)"),
                     NEXT_RIGHT=(nxt.right if nxt else "(end)"))
         trans = seg.draft.get("transitions") if isinstance(seg.draft, dict) else None
+        hint = ""
         if trans:
             hint = "; ".join(f"{e['kind']} of {e.get('object','the object')} by the "
                              f"{e['hand']} hand at t={float(e['t']):.1f}s" for e in trans)
@@ -438,18 +437,25 @@ def label_segments(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
                        "acquiring in this window.")
         out = gv.watch(prompt, system, SC.VIDEO_LABEL_NATIVE, a=oa, b=ob,
                        fps=FPS_LABEL, max_tokens=2000)
-        return i, out
+        return i, out, {"window": f"{round(oa,1)}-{round(ob,1)}s @ {FPS_LABEL}fps",
+                        "facts": facts, "track": track, "bursts": bursts,
+                        "transition_hint": hint or "(none)"}
 
     for r in _parallel(_one, todo, wd=wd, tag="P4b label"):
         if r is None:                                  # all worker-levels failed for it
             continue
-        i, out = r
+        i, out, dbg = r
         seg = s.segments[i]
         seg.left = out.get("left", "N/A") or "N/A"
         seg.right = out.get("right", "N/A") or "N/A"
         seg.draft = {"labeled": True, "label_think": out.get("think", ""),
                      "label": {"left": seg.left, "right": seg.right},
-                     "origin": seg.boundary_provenance}
+                     "origin": seg.boundary_provenance,
+                     "transitions": (seg.draft.get("transitions")
+                                     if isinstance(seg.draft, dict) else None),
+                     "label_in": dbg}
+        _log(wd, f"  P4b seg#{i+1} [{seg.start:.1f}-{seg.end:.1f}] -> "
+                f"L:{seg.left!r} R:{seg.right!r} | hint:{dbg['transition_hint']}")
 
 
 def seg_reconcile_pass(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
@@ -520,8 +526,7 @@ def delete_only_critic(s: ClipState, system: str, wd: Path):
         return
     s.ran.add("merge_critic")
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=600,
-                             max_side=_safe_side(s.duration, FPS_GATE))
+                             ctx=0.0, cap_frames=90)
     r = claude_call(_p("merge_critic.txt", DIRECTION=s.direction,
                        TIMELINE=s.timeline_text()),
                     frames, system, SC.MERGE_CRITIC, model=CLAUDE_GATE)
@@ -661,8 +666,7 @@ def phase4(s: ClipState, gv: GeminiVideo, gframes_pro: GeminiFrames,
 # =========================================================================== #
 def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=600,
-                             max_side=_safe_side(s.duration, FPS_GATE))
+                             ctx=0.0, cap_frames=90)
     flagged = s.flags_text()
     r = claude_call(_p("opus_final.txt", DIRECTION=s.direction, GOAL=s.goal,
                        TRACK=s.track_lines(),
@@ -670,7 +674,7 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
                        TIMELINE=s.timeline_text(), FLAGGED=flagged,
                        ANALYSIS=s.analysis_report or ""),
                     frames, system, SC.GATE, model=CLAUDE_GATE)
-    s.gate_findings = str(r.get("findings", ""))[:600]
+    s.gate_findings = str(r.get("findings", ""))     # full findings (no truncation)
     s.purpose_verdict = r.get("purpose_verdict", "")
     if r.get("purpose_check"):
         s.goal = r["purpose_check"] if s.purpose_verdict == "corrected" else s.goal
@@ -728,7 +732,7 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
     if not s.segments:
         return
     frames = render_labeled(s.clocked, s.segments, FPS_FRESH, str(wd),
-                            max_side=_safe_side(s.duration, FPS_FRESH), cap_frames=600)
+                            max_side=720, cap_frames=80)
     if not frames:
         return
     try:
@@ -823,10 +827,13 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
                     "Re-check for missed place/pickup/handoff boundaries.")
     # restore the best attempt (clear the per-attempt guard so the final critics run on it)
     s.segments, s.flags, s.track, s.ran = best[1], best[2], best[3], set()
+    s.stage_snapshots = []                            # trace the EXPORTED lineage only
+    _snap(s, f"P4+P5 accepted (attempt {best[4]}: labeler + gate)", wd)
 
     # ---- FINAL polish + audit, ONCE on the accepted timeline (before export) ----
     delete_only_critic(s, system, wd)                 # merge any over-split runs
     s.track = derive_track_from_labels(s.segments)
+    _snap(s, "P4d delete-only critic", wd)
     added = completeness_check(s, gv, system, wd)     # folds missing pick/place into s.transitions
     if added:                                         # turn those findings into real segments
         _log(wd, f"=== completeness added {added} missing transition(s) -> final round (broad->refine) ===")
@@ -834,9 +841,11 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
         phase4(s, gv, gframes_pro, system, wd, max_passes=1)   # re-segment+label with augmented transitions
         delete_only_critic(s, system, wd)
         s.track = derive_track_from_labels(s.segments)
+        _snap(s, "P4e completeness re-segment", wd)
 
     # ---- PHASE 6: fresh-eye final review (context-free), the last word ----
     fresh_eye(s, system, wd)
+    _snap(s, "P6 fresh-eye (final, exported)", wd)
 
     episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)
     _log(wd, f"=== DONE {time.time()-t0:.0f}s | {len(s.segments)} segments, "

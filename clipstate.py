@@ -72,6 +72,7 @@ class ClipState:
     flags: list[Flag] = field(default_factory=list)
     analysis_report: str = ""                              # code-generated advisory facts
     fresh_eye_note: str = ""                               # what the fresh-eye pass changed
+    stage_snapshots: list = field(default_factory=list)    # timeline after each transform (trace)
 
     # --- run-once guards for on-demand critics (merge_critic / completeness) ---
     ran: set = field(default_factory=set)

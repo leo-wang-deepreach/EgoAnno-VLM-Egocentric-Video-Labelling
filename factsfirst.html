@@ -56,6 +56,10 @@
   .think{color:var(--mut);font-size:12px}
   .legend span{display:inline-block;margin-right:10px;font-size:11px;color:var(--mut)}
   .sw{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:3px}
+  .iobar{display:flex;flex-wrap:wrap;gap:6px;margin:0 0 9px;font-size:11px}
+  .iobar span{padding:2px 8px;border-radius:6px;border:1px solid var(--line);color:var(--mut);background:#11161d}
+  .iobar .io-fps{background:#1b212b;color:var(--acc);font-variant-numeric:tabular-nums}
+  .iobar b{color:var(--txt);font-weight:600;margin-right:4px}
 </style>
 </head>
 <body>
@@ -162,10 +166,25 @@ function buildTimeline(){
   $('#legend').innerHTML=seen.map(p=>`<span><i class="sw" style="background:${PROV[p]||'#30363d'}"></i>${esc(p)}</span>`).join('');
 }
 
+const STEPMETA={
+ '1a':{fps:'10 fps',inp:'whole clip, 20s windows — PIXELS',out:'object catalogue + per-frame fg/bg/contact'},
+ '1c':{fps:'30 fps',inp:'sliding 3.5s windows — PIXELS (opus)',out:'place/pickup/handoff events'},
+ '2' :{fps:'30 fps',inp:'short burst windows — PIXELS (opus)',out:'rotation/role/colour verdicts'},
+ '3' :{fps:'10 fps',inp:'whole clip + objects + track + bursts',out:'direction + derived goal'},
+ '4' :{fps:'10 fps',inp:'segment: track+transitions(hints)+goal · label: per-seg window + contact facts',out:'segments + per-hand labels'},
+ '4d':{fps:'TEXT only',inp:'label timeline + track (NO video)',out:'verifier flags'},
+ '4e':{fps:'CODE only',inp:'track / labels / transitions',out:'advisory analysis + flags'},
+ '5' :{fps:'2 fps',inp:'whole-clip frames + timeline + flags + analysis (opus)',out:'corrections + quality verdict'},
+ '6' :{fps:'4 fps',inp:'whole-clip frames w/ labels overlaid, NO other context (opus)',out:'corrected timeline'},
+};
 function sect(title,sub,inner,open){
+  const key=(title.match(/Step\s+([0-9][a-z]?)/)||[])[1];
+  const m=key&&STEPMETA[key]; let bar='';
+  if(m){ sub=(sub?sub+' · ':'')+m.fps;
+    bar=`<div class="iobar"><span class="io-in"><b>in</b> ${esc(m.inp)}</span><span class="io-out"><b>out</b> ${esc(m.out)}</span><span class="io-fps">${esc(m.fps)}</span></div>`; }
   return `<section><h2 data-t onclick="this.nextElementSibling.classList.toggle('collapsed')">
     <span>${title}</span><span class="sub">${sub||''}</span></h2>
-    <div class="body${open?'':' collapsed'}">${inner}</div></section>`;
+    <div class="body${open?'':' collapsed'}">${bar}${inner}</div></section>`;
 }
 function trackTbl(tr){
   let h='';
@@ -182,13 +201,18 @@ function buildPanels(){
   const flagsBy={}; (EP._flags||[]).forEach(f=>{(flagsBy[f.seg]=flagsBy[f.seg]||[]).push(f);});
   const segRows=SEGS.map((s,i)=>{
     const fl=(flagsBy[i+1]||[]).map(f=>`⚑${esc(f.type)}`).join(' ');
-    const think=(segTrace[i]&&segTrace[i].label_think)||'';
+    const tr0=segTrace[i]||{};
+    const think=tr0.label_think||'';
+    const li=tr0.label_in||null;
+    const gx=tr0.gate||null;
     return `<tr class="row-click" data-i="${i}" onclick="document.getElementById('vid').currentTime=${s.start_sec}+0.02">
       <td class="t">#${i+1}<br>${f1(s.start_sec)}<br>${f1(s.end_sec)}</td>
       <td><div class="ll ${isNA(s.left)?'na':''}">L · ${esc(s.left)}</div>
           <div class="rr ${isNA(s.right)?'na':''}">R · ${esc(s.right)}</div>
           <div class="prov">${esc(s.boundary_provenance)} · conf ${s.confidence} ${fl?'· <span class=flag>'+fl+'</span>':''}</div>
-          ${think?`<div class="think">${esc(think)}</div>`:''}</td></tr>`;
+          ${think?`<div class="think">💭 ${esc(think)}</div>`:''}
+          ${li?`<div class="think">📥 labeler input: ${esc(li.window)} · transition hint: ${esc(li.transition_hint)}<br><span style="color:var(--mut)">contact facts: ${esc(li.facts||'')}</span></div>`:''}
+          ${gx?`<div class="think">⚙ gate edit: ${esc((gx.left?('L "'+gx.left.from+'"→"'+gx.left.to+'" '):'')+(gx.right?('R "'+gx.right.from+'"→"'+gx.right.to+'"'):''))}</div>`:''}</td></tr>`;
   }).join('');
 
   const tr=EP._track||{left:[],right:[]};
@@ -200,18 +224,25 @@ function buildPanels(){
 
   // panels in CHRONOLOGICAL pipeline order: step 1 (facts) -> last step (fresh-eye)
   const cf=EP._contact_frames||[];
-  const stepN=Math.max(1,Math.round(cf.length/12));
-  const cfSamp=cf.filter((_,k)=>k%stepN===0).slice(0,14);
-  const cfTbl=cfSamp.length?'<table><thead><tr><th>t</th><th>foreground</th><th>background</th><th>L</th><th>R</th></tr></thead>'+
-    cfSamp.map(fr=>`<tr><td class="t">${f1(fr.t)}</td><td>${esc(fr.foreground||'')}</td><td>${esc(fr.background||'')}</td><td class="ll">${esc(fr.left_touching||'')}</td><td class="rr">${esc(fr.right_touching||'')}</td></tr>`).join('')+'</table>':'<div class="empty">no per-frame facts</div>';
+  const cfTbl=cf.length?'<div style="max-height:300px;overflow:auto"><table><thead><tr><th>t</th><th>foreground</th><th>background</th><th>L</th><th>R</th></tr></thead>'+
+    cf.map(fr=>`<tr><td class="t">${f1(fr.t)}</td><td>${esc(fr.foreground||'')}</td><td>${esc(fr.background||'')}</td><td class="ll">${esc(fr.left_touching||'')}</td><td class="rr">${esc(fr.right_touching||'')}</td></tr>`).join('')+'</table></div>':'<div class="empty">no per-frame facts</div>';
+  // STAGE TRACE — the timeline after each transform (find the bad step)
+  const stages=EP._stages||[];
+  const traceHtml=stages.length?stages.map(st=>
+    `<div style="margin:0 0 10px"><b style="color:var(--acc)">${esc(st.stage)}</b> · ${st.n} segs
+     <table>${(st.segs||[]).map((g,i)=>`<tr><td class="t">#${i+1} ${f1(g.start_sec)}–${f1(g.end_sec)}</td><td class="ll ${isNA(g.left)?'na':''}">${esc(g.left)}</td><td class="rr ${isNA(g.right)?'na':''}">${esc(g.right)}</td></tr>`).join('')}</table></div>`
+    ).join(''):'<div class="empty">no stage trace in this episode — re-run on current code to capture it</div>';
   const feSegs=SEGS.filter(s=>s.boundary_provenance==='fresh_eye').length;
 
   let html='';
+  // STAGE TRACE (top, open) — watch the timeline evolve, spot the step that broke it
+  html+=sect('▶ Stage trace — timeline after each step (find the bad step)',
+    stages.length+' stages', traceHtml, true);
   // STEP 1a — objects + contact track (ground truth)
   html+=sect('Step 1a · objects + contact track (ground truth)',
     objs.length+' objects · '+cf.length+' frames',
     `<div class="kv"><b>objects:</b> ${objs.map(o=>`<span class="chip">${esc(o.name)}${o.colour?' ('+esc(o.colour)+')':''}</span>`).join('')}</div>
-     <div style="margin-top:8px"><b class="kv">per-frame facts (fg / bg / contact, sampled):</b>${cfTbl}</div>
+     <div style="margin-top:8px"><b class="kv">per-frame facts (fg / bg / contact — ALL ${cf.length} frames):</b>${cfTbl}</div>
      <div style="margin-top:8px">${trackTbl(tr)}</div>`);
   // STEP 1c — transitions
   html+=sect('Step 1c · transitions (place/pickup/handoff)',trans.length+' events',
