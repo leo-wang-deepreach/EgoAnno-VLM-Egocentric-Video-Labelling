@@ -20,7 +20,7 @@ class Segment:
     end: float
     left: str = "N/A"
     right: str = "N/A"
-    boundary_provenance: str = "cycle_template"   # how seg.start was set
+    boundary_provenance: str = "segment"          # how seg.start was set
     confidence: float = 0.6
     draft: dict = field(default_factory=dict)     # per-stage trace of this seg
 
@@ -53,8 +53,6 @@ class ClipState:
     objects: list[dict] = field(default_factory=list)     # {name, colour, function}
     contact_frames: list[dict] = field(default_factory=list)  # 10fps per-frame facts
     track: dict = field(default_factory=lambda: {"left": [], "right": []})  # intervals
-    cycle_pattern: str = ""
-    cycle_period_sec: float | None = None
     phase_boundaries: list[float] = field(default_factory=list)
     transitions: list[dict] = field(default_factory=list)   # {t,hand,object,kind}
 
@@ -132,7 +130,8 @@ class ClipState:
                 continue
             lt = fr.get("left_touching") or "empty"
             rt = fr.get("right_touching") or "empty"
-            rows.append(f"t={t:.1f} L:{lt} R:{rt}")
+            fg = fr.get("foreground") or "?"
+            rows.append(f"t={t:.1f} fg:{fg} L:{lt} R:{rt}")
         return "\n".join(rows) if rows else "(no contact facts in window)"
 
     def timeline_text(self) -> str:

@@ -6,12 +6,13 @@ Task: <<GOAL>>
 Objects (name: function; how handled): <<INVENTORY>>
 Possession track — which object each forearm is interacting with over time (cut when a forearm's contacted object CHANGES; a noisy hint, trust the frames over it): <<TRACK>>
 Findings from close-up frame bursts (ground truth for those moments): <<BURSTS>>
+Detected candidate boundary times (place/pickup/handoff from a dense scan) — HINTS ONLY, not cuts: <<TRANSITION_HINTS>>. Confirm each against what you SEE at this frame rate and add a cut there only if a grip visibly opens or closes; also find any real place/pickup the hints missed. You decide every cut — these are only leads.
 
 OVERRIDE for this dataset (takes precedence over rules 10-11 below): the FIRST acquisition (the initial pick that starts the clip) and the FINAL deposit (the ending place/release) ARE their own segments — always put a cut just after the initial pick and just before the final place. Likewise, each place-down and pick-up where a hand visibly opens or closes its grip on the WORKED object is its own segment. Do not fold these into the neighbouring action.
 
 Rules:
-1. First watch for the repeated visual cycle, if any. In "cycle_pattern", write only a location/state pattern, not action labels, e.g. "source pile -> center work area -> box".
-2. Use the cycle pattern as a guide only. Visible off-cycle motions such as table/pile management, clearing, recovery, failed attempts, dropped items, or tool/object repositioning get their own cuts when they form complete visible sub-goals.
+1. First watch for any repeated pattern of work (e.g. source pile -> center work area -> destination). Use it ONLY as an internal guide to where one sub-goal ends and the next begins — do not output it.
+2. Visible off-pattern motions such as table/pile management, clearing, recovery, failed attempts, dropped items, or tool/object repositioning get their own cuts when they form complete visible sub-goals.
 3. A valid segment contains one complete, labelable visible sub-goal or task phase — one ATOMIC action (a single verb on a single object-state change), NEVER "a whole task got completed". When the hand switches from one contacted tool/object to a different tool/object or to bare fingers, that is a purpose change — cut there. Cut only when the visible purpose changes: new object, new destination, new task phase, or fundamentally different hand/object motion.
 4. Do not cut inside continuous motion on the same object toward the same goal, even if it crosses clock seconds. Regrips, small corrections, repeated tries without completed release, and continuous handling of a handful/group stay in one segment.
 4b. Continuous handling vs discrete micro-cycles: do NOT create repeated pick/release cycles for continuous handling of the same handful, pile, cluster, flexible group or container mouth when the hand stays in contact or immediately recontacts without a visible completed let-go. A discrete release segment requires VISIBLE completion (object no longer hand-controlled; the releasing hand open/empty or clearly separated). If sampled "release" moments look like the "pick/handle" moments, collapse into one continuous-action segment (gather/tuck/arrange/feed/pack).
@@ -36,4 +37,4 @@ Rules:
 20. If a needed cut depends on motion too fine to see, put that time and the exact question in "need_burst".
 
 Raw JSON only:
-{"cycle_pattern": "<one line>", "boundaries": [<number>, ...], "need_burst": [{"t": <number>, "question": "<what to check>"}]}
+{"boundaries": [<number>, ...], "need_burst": [{"t": <number>, "question": "<what to check>"}]}

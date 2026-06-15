@@ -5,9 +5,16 @@ You watch a window of this clip sampled at 10 fps (top-right clock = the time au
 === OBJECT CATALOGUE ===
 List every DISTINCT physical object that appears anywhere in this window. Give each a stable, specific identity by visible colour + form (e.g. "blue cylindrical part", "metal ring", "white container"). Keep that exact name for the same object across all frames. A pile of like items is ONE entry named once (e.g. "pile of mixed-colour pieces"); do not invent a colour for a mixed pile. "function" is optional and must be a neutral physical descriptor, never a task role.
 
-=== PER-FRAME CONTACT ===
-For EACH sampled frame output one record with:
+The object set is NOT fixed — watch the whole window for it to change:
+  - DECOMPOSITION (one object -> several): when a sub-part visibly SEPARATES from an object — a sticky strip / protective film / red peel-off layer pulled off a sealed bag, a cap removed from a body, a label peeled, a lid taken off — the separated part becomes its OWN catalogue entry from the moment it appears (e.g. "clear sealed bag" + "red peel-off strip"). Name the parts you can see, not just the whole.
+  - COMBINATION (several -> one): when separate parts are visibly joined into a unit, the unit is one entry from then on; after they separate again it stops being a unit.
+List the parts as their own objects the instant they exist; this is why watching the full window matters.
+
+=== PER-FRAME RECORD ===
+For EACH sampled frame output one record with these FACTS only — name objects, never name an action, never say who is "working":
   - t            : the clock time you read off that frame (one decimal second)
+  - foreground   : the object(s) in the FOREGROUND this frame — what is at the active work area between/near the hands (the item(s) being handled or closest to the camera), by catalogue name. If two are prominent, name both ("silver bolt + silver nut"). "none" if the hands are empty and nothing is at the work area. This is an object name, NOT an action.
+  - background   : the scene BEHIND the work area this frame — the source/destination piles, containers, trays, or surface zones, by catalogue name (e.g. "right pile of bolts; left pile; dark table"). Context only; not what is being touched.
   - left_touching   : ONLY the single object the LEFT hand is grasping or in firm load-bearing contact with this frame, by its catalogue name; or "empty" if the left hand holds nothing; or "out of frame" if the left forearm is not visible. Report the INTERACTED object only — not nearby or background objects.
   - right_touching  : same for the RIGHT hand
 
@@ -27,7 +34,7 @@ A hand is "empty" in any frame where it is NOT closed around an object: open, re
 Report the real grip state every frame — do not smear one object name across the whole window when the truth changes:
   - When a hand grabs a fresh item from a pile/source, report "empty" during the reach, then the item's name once gripped — even if the new item looks identical to the last one. Repeated fetches each show their own grasp and the brief empty reach between them.
   - A real RELEASE: a hand SETS its object down on the surface (object stays, hand opens) or HANDS it to the other hand -> "empty" at that instant. Capture set-down and hand-off moments even if brief.
-  - IDENTITY CHANGE: once parts become joined, the held object's NAME becomes the combined unit from then on (e.g. a rod-with-ring unit, not the bare rod); after separation it stops being the unit.
+  - IDENTITY CHANGE: once parts become joined, the held object's NAME becomes the combined unit from then on (e.g. a rod-with-ring unit, not the bare rod). Conversely, once a part is SEPARATED off (peeled strip, removed cap), name whichever part the hand actually holds — the hand may now hold the peeled strip, or the remainder, not the original whole.
   - A hand that keeps holding the SAME single object steadily (e.g. bracing a part) is holding it continuously — report it across those frames; a momentary regrip of a still-held object is not a release.
 
 Be accurate, not smooth: a hand bracing one part for a long time AND the other hand fetching item after item are BOTH normal — report each exactly as seen.

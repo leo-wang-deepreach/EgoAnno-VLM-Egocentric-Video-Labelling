@@ -7,6 +7,8 @@ This window covers t=<<WA>>s to t=<<WB>>s, shown frame by frame.
   - pickup   : a hand CLOSES its grip on an object that was resting on the surface and lifts it. Report the instant the grip closes.
   - handoff  : an object passes directly from one hand to the other (giver opens, receiver grips). Report once, at the transfer.
 
+For EVERY event, name the OBJECT involved by its visible identity + colour (e.g. "clear plastic bag", "black shoe sole", "silver bolt"). Never leave the object blank — if you cannot name a specific identity, give the best visible description ("small metal part"), never empty.
+
 === HOW TO JUDGE ===
 - Watch the hands frame by frame. A place is real only if the hand visibly OPENS and the object stays behind. A pickup is real only if the hand was empty and then CLOSES on a resting object. Give the exact clock time of that frame.
 - Do NOT report ongoing work: threading/twisting/screwing a held object, or a brief finger regrip while still holding it, is NOT a place or pickup.

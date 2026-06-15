@@ -3,7 +3,6 @@ You decide the single TASK DIRECTION for a robot-learning manipulation clip AND 
 You watch whole-clip coverage frames (top-right clock = time authority).
 
 Object catalogue: <<OBJECTS>>
-Cycle template (the repeated pattern, location/state only — no direction baked in): <<CYCLE_PATTERN>>
 Possession track (independent ground truth — which object each forearm engages over time): <<TRACK>>
 Reduced rotation verdicts (decisive bursts only; indeterminate ones already removed): <<BURSTS>>
 Burst direction summary (counts and whether decisive verdicts form contiguous runs): <<BURST_SUMMARY>>

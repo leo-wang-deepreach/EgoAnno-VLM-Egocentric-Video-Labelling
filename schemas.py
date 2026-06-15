@@ -31,9 +31,12 @@ CONTACT_TRACK = {
             "type": "OBJECT",
             "properties": {
                 "t": {"type": "NUMBER"},
+                "foreground": {"type": "STRING"},
+                "background": {"type": "STRING"},
                 "left_touching": {"type": "STRING"},
                 "right_touching": {"type": "STRING"}},
-            "required": ["t", "left_touching", "right_touching"]}},
+            "required": ["t", "foreground", "background",
+                         "left_touching", "right_touching"]}},
     },
     "required": ["objects", "frames"],
 }
@@ -45,11 +48,10 @@ SEG_RECONCILE = {
     "required": ["boundaries"],
 }
 
-# Phase 4 — v49 segmentation (single native pass: cuts + cycle, NO labels)
+# Phase 4 — v49 segmentation (single native pass: cuts only, NO labels)
 V49_SEGMENT = {
     "type": "OBJECT",
     "properties": {
-        "cycle_pattern": {"type": "STRING"},
         "boundaries": {"type": "ARRAY", "items": {"type": "NUMBER"}},
         "need_burst": _NEED_BURST,
     },
@@ -120,7 +122,7 @@ WINDOW_TRANSITIONS = {
                 "kind": {"type": "string", "enum": ["place", "pickup", "handoff"]},
                 "object": {"type": "string"},
                 "evidence": {"type": "string"}},
-            "required": ["t", "hand", "kind", "evidence"],
+            "required": ["t", "hand", "kind", "object", "evidence"],
             "additionalProperties": False}},
     },
     "required": ["events"],

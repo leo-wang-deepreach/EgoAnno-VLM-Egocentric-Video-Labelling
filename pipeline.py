@@ -4,11 +4,12 @@
 One ClipState flows through five phases; every stage reads a COMPACTED view and
 writes back. Spine = the 10fps object+hand-contact track (the ground truth).
 
-  P1  facts        contact_track (Gemini 10fps) -> cycle_detect (Gemini 2fps)
+  P1  facts        contact_track (Gemini 10fps: objects + fg/bg + per-hand contact)
+                   -> transition scan (Claude opus, sliding 30fps windows)
   P2  evidence     burst sweep (Gemini 30fps) -> burst_reduce (deterministic)
   P3  direction    direction_decide (Gemini 10fps whole) — also derives the goal
-  P4  rough->refine rough_segment (Gemini 2fps) -> per-seg label (GPT 10fps) ->
-                    edge verify (Gemini 30fps) -> template_match (GPT)   [<=2 passes]
+  P4  segment+label v49_segment (Gemini 10fps; sole cut authority) -> per-seg label
+                    (Gemini native 10fps) -> merge -> seg_reconcile -> verifiers [<=2 passes]
   P5  gate+export  gate (Claude opus-4-8 2fps whole) -> deterministic QA -> export
 """
 from __future__ import annotations
@@ -32,7 +33,6 @@ PROMPTS = HERE / "prompts"
 # frame budgets (facts-first; refine-heavy then label-heavy)
 FPS_CONTACT = 10.0
 FPS_TRANSITION = 10.0     # dense whole-clip read to catch brief place/pickup/handoff
-FPS_CYCLE = 2.0
 FPS_DIRECTION = 10.0      # user override: dense whole-clip read for direction
 FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visible
 FPS_LABEL = 10.0          # per-segment NATIVE labeling / focused refine
@@ -174,7 +174,7 @@ def phase1_transitions(s: ClipState, system: str, wd: Path, hint: str = ""):
 def phase2_bursts(s: ClipState, system: str, wd: Path):
     reqs = []
     # seed 2-3 direction probes across the clip (where rotation shows). (No cycle stage:
-    # cycle_detect was vestigial/unstable; the v49 segmenter sets cycle_pattern itself.)
+    # it was vestigial/unstable and never drove anything — removed.)
     spans = plan_windows(s.duration, max(4.0, s.duration / 4))   # already (a,b) pairs
     qdir = ("Watching ONLY the visible rotation/motion of the part being worked, is "
             "this moment ASSEMBLY (tightening/screwing-on/joining/inserting) or "
@@ -215,7 +215,6 @@ def phase2_bursts(s: ClipState, system: str, wd: Path):
 def phase3_direction(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     r = gv.watch(_p("direction_decide.txt",
                     OBJECTS=s.objects_line(),
-                    CYCLE_PATTERN=s.cycle_pattern or "(none)",
                     TRACK=s.track_lines(),
                     BURSTS="\n".join(s.bursts_reduced) or "(no decisive bursts)",
                     BURST_SUMMARY=s.direction_burst_summary),
@@ -276,24 +275,25 @@ def _tag_transitions(s: ClipState):
 def v49_segment(s: ClipState, gv: GeminiVideo, system: str, wd: Path) -> list[float]:
     """SEGMENTATION (v49, ported): one native whole-clip pass with v49's battle-tested
     atomic-action cut rules (one complete sub-goal per segment, anti-swallowing guards,
-    conservative 2-8s). Returns the cut times; also sets the cycle pattern. Our own
-    detected place/pickup/handoff transitions are UNIONED in so brief transitions v49's
-    coarser read might miss still become boundaries."""
+    conservative 2-8s). This is the SOLE cut authority: it returns every boundary. The
+    Phase-1c place/pickup/handoff transitions are handed in only as SOFT HINTS the
+    segmenter confirms against its own 10fps read — they are never pre-injected as cuts."""
+    # Detected place/pickup/handoff times are passed as SOFT HINTS only — the segmenter
+    # confirms each against its own 10fps read and decides. We do NOT pre-inject them as
+    # hard cuts: ALL cutting happens here, in segmentation.
+    thint = ("; ".join(f"{round(float(e['t']),1)}s {e.get('kind','?')} "
+                       f"({e.get('hand','?')})" for e in s.transitions)
+             or "(none detected)")
     r = gv.watch(_p("v49_segment.txt", A=0.0, B=round(s.duration, 1),
                     GOAL=s.goal or "(unknown)", INVENTORY=s.objects_line(),
                     TRACK=s.track_lines(),
+                    TRANSITION_HINTS=thint,
                     BURSTS="\n".join(s.bursts_reduced) or "(none)"),
                  system, SC.V49_SEGMENT, a=0.0, b=s.duration, fps=FPS_SEGMENT,
                  max_tokens=4000)
-    if r.get("cycle_pattern"):
-        s.cycle_pattern = r["cycle_pattern"]
-    cuts = set(float(x) for x in r.get("boundaries", [])
-               if x is not None and 0.3 < float(x) < s.duration - 0.3)
-    n_v49 = len(cuts)
-    cuts |= set(s.transition_cuts())                  # union our detected transitions
-    cuts = sorted(c for c in cuts if 0.3 < c < s.duration - 0.3)
-    _log(wd, f"P4 v49 segmentation: {n_v49} v49 cuts + transitions -> {len(cuts)} cuts | "
-            f"cycle='{s.cycle_pattern}'")
+    cuts = sorted(float(x) for x in r.get("boundaries", [])
+                  if x is not None and 0.3 < float(x) < s.duration - 0.3)
+    _log(wd, f"P4 v49 segmentation: {len(cuts)} cuts (segmenter-only, no preliminary union)")
     return cuts
 
 
@@ -301,11 +301,36 @@ def _norm_lbl(x: str) -> str:
     return " ".join(str(x or "N/A").lower().split())
 
 
+def _label_sim(a: str, b: str) -> float:
+    """Generic word-overlap (Jaccard) between two labels — NOT a semantic wordlist, just
+    token overlap. ~1.0 = identical wording; high = same action worded slightly
+    differently ('thread the nut' vs 'tighten the nut')."""
+    wa, wb = set(_norm_lbl(a).split()), set(_norm_lbl(b).split())
+    if not wa or not wb:
+        return 1.0 if wa == wb else 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def _labels_mergeable(p_l, p_r, s_l, s_r, thresh: float = 0.6) -> bool:
+    """Two adjacent segments are mergeable when BOTH hands read as the SAME action —
+    exact OR highly similar wording (token overlap >= thresh). An idle hand (N/A) must
+    match N/A exactly: idle vs active is never 'similar'."""
+    def one(a, b):
+        na, nb = _norm_lbl(a), _norm_lbl(b)
+        if na == nb:
+            return True
+        if na == "n/a" or nb == "n/a":
+            return False
+        return _label_sim(a, b) >= thresh
+    return one(p_l, s_l) and one(p_r, s_r)
+
+
 def merge_identical_labels(s: ClipState, wd: Path):
-    """Deterministically merge consecutive segments whose (left,right) label pair is
-    identical — the step that turns the dense base into the real timeline. A boundary
-    that coincides with a DETECTED place/pickup/handoff is PROTECTED: never merged away,
-    even if the labels happen to match (the transition makes it a real action change)."""
+    """Deterministically merge consecutive segments whose (left,right) labels read as the
+    SAME action — exact OR near-identical wording (generic token overlap, no wordlist), so
+    'thread the nut' and 'tighten the nut' collapse. A boundary that coincides with a
+    DETECTED place/pickup/handoff is PROTECTED: never merged away (the transition makes it
+    a real action change); an idle hand (N/A) must match N/A exactly."""
     if not s.segments:
         return
     protect = [float(e["t"]) for e in s.transitions if e.get("t") is not None]
@@ -313,8 +338,8 @@ def merge_identical_labels(s: ClipState, wd: Path):
     for seg in s.segments[1:]:
         prev = merged[-1]
         guarded = any(abs(seg.start - t) <= 0.5 for t in protect)
-        if (not guarded and _norm_lbl(prev.left) == _norm_lbl(seg.left)
-                and _norm_lbl(prev.right) == _norm_lbl(seg.right)):
+        if (not guarded
+                and _labels_mergeable(prev.left, prev.right, seg.left, seg.right)):
             prev.end = seg.end                       # extend the run
             prev.draft = {**prev.draft, "merged_run": True}
         else:
@@ -548,8 +573,6 @@ def neighbor_review(s: ClipState, gframes_pro: GeminiFrames, wd: Path):
 
 def template_match(s: ClipState, gframes_pro: GeminiFrames, wd: Path):
     prompt = _p("template_match.txt", DIRECTION=s.direction, GOAL=s.goal,
-                CYCLE_PATTERN=s.cycle_pattern or "(none)",
-                PERIOD=(round(s.cycle_period_sec, 1) if s.cycle_period_sec else "unknown"),
                 TRACK=s.track_lines(), TIMELINE=s.timeline_text())
     r = gframes_pro.call(prompt, [], schema=SC.TEMPLATE_MATCH, max_tokens=2000,
                          reasoning="low")

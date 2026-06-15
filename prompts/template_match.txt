@@ -1,9 +1,7 @@
-You audit a drafted manipulation timeline against the clip's own repeating template. You see NO video — only the label timeline and the structure derived upstream. Your job is to FLAG segments that deviate from the expected cycle so a later gate can scrutinize them against frames. You do NOT rewrite labels and you do NOT re-decide direction.
+You audit a drafted manipulation timeline against its own repeated structure. You see NO video — only the label timeline and the possession track. Your job is to FLAG segments that deviate from the repeated pattern so a later gate can scrutinize them against frames. You do NOT rewrite labels and you do NOT re-decide direction.
 
 Decided direction (settled): <<DIRECTION>>
 Derived goal: <<GOAL>>
-Cycle template (repeated pattern, location/state only): <<CYCLE_PATTERN>>
-Approx cycle period (seconds, or "unknown"): <<PERIOD>>
 Possession track (independent ground truth): <<TRACK>>
 
 FINAL TIMELINE (1-based segment numbers):
