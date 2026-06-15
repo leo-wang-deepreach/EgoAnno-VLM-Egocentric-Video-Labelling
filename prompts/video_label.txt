@@ -6,8 +6,8 @@ You watch this clip from t=<<OA>>s to t=<<OB>>s at 10 fps (top-right clock = abs
 Task goal (derived upstream, a hypothesis): <<GOAL>>
 Decided direction (settled upstream — your labels must be consistent with it): <<DIRECTION>>
 Objects: <<INVENTORY>>
-Possession track over this window (a NOISY HINT for which forearm holds what — it is sometimes wrong; trust the video frames over it whenever they disagree): <<TRACK>>
-Per-frame contact-facts hint inside the core (a rough auto-extracted guess of which object each hand touches each 0.1s — use it only when it matches what you SEE; the frames are the authority, not these facts):
+Possession track over this window — RELIABLE. It is your PRIMARY evidence for which forearm holds what and which is empty over time. Ground your reading in it; override only if the frames plainly contradict it: <<TRACK>>
+Per-frame contact facts inside the core — a RELIABLE per-0.1s record of which object each hand holds (the 1A ground truth). Your labels MUST be consistent with it: a hand it shows EMPTY across the core is N/A; a hand it shows GRIPPING an object is doing something with THAT named object. Use these facts for WHO holds WHAT and WHO is empty (per hand, do not swap L/R); use the frames to name the visible ACTION:
 <<CONTACT_FACTS>>
 Decisive rotation/role/colour verdicts inside the core (these ARE reliable for those moments): <<BURSTS>>
 Previous segment's label (continuity, TEXT only): L: <<PREV_LEFT>> | R: <<PREV_RIGHT>>
