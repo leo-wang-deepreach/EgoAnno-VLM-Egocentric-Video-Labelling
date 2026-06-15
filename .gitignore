@@ -44,3 +44,6 @@ _experimental_v19_v21/
 
 # ─── os cruft ─────────────────────────────────────────────────────────────
 .DS_Store
+
+# generated dashboard manifest
+factsfirst_manifest.json

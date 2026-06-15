@@ -1,0 +1,251 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>egoanno · facts-first</title>
+<style>
+  :root{--bg:#0d1117;--panel:#161b22;--panel2:#0b0e13;--line:#272e3a;--txt:#e6edf3;
+        --mut:#8b949e;--L:#3fb950;--R:#58a6ff;--acc:#d29922;--na:#6e7681;--good:#2ea043;--bad:#da3633}
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--txt);font:13.5px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
+  header{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
+  header h1{font-size:15px;margin:0;font-weight:700;letter-spacing:.3px}
+  select{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:5px 9px;font:inherit}
+  .pill{font-size:12px;padding:2px 9px;border-radius:999px;background:#21262d;border:1px solid var(--line);color:var(--mut)}
+  .pill b{color:var(--txt)} .pill.good b{color:var(--good)} .pill.bad b{color:var(--acc)}
+  .wrap{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;padding:16px 18px;align-items:start}
+  @media(max-width:1050px){.wrap{grid-template-columns:1fr}}
+  /* keep the video + live labels in view while scrolling the per-section panels */
+  .leftcol{position:sticky;top:58px;align-self:start;max-height:calc(100vh - 70px);overflow:auto}
+  @media(max-width:1050px){.leftcol{position:static;max-height:none;overflow:visible}}
+  video{width:100%;border-radius:10px;background:#000;display:block}
+  .goal{color:var(--mut);font-size:13px;margin:8px 2px 0}
+  .now{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
+  .hand{padding:10px 13px;border-radius:10px;background:var(--panel);border:1px solid var(--line);min-height:58px}
+  .hand .tag{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut)}
+  .hand .lab{font-size:17px;font-weight:600;margin-top:3px}
+  .hand.L{border-left:3px solid var(--L)} .hand.L .tag{color:var(--L)}
+  .hand.R{border-left:3px solid var(--R)} .hand.R .tag{color:var(--R)}
+  .lab.na{color:var(--na);font-style:italic;font-weight:500}
+  .tl{position:relative;height:42px;margin-top:12px;background:var(--panel2);border:1px solid var(--line);border-radius:8px;overflow:hidden;cursor:pointer}
+  .seg{position:absolute;top:0;bottom:0;border-right:1px solid var(--panel2);opacity:.85}
+  .seg.cur{outline:2px solid var(--acc);outline-offset:-2px;opacity:1;z-index:2}
+  .seg span{position:absolute;left:3px;top:2px;right:2px;font-size:10px;color:#fff;font-weight:700;
+            white-space:nowrap;overflow:hidden;text-shadow:0 1px 2px #000,0 0 2px #000}
+  .ph{position:absolute;top:0;bottom:0;width:2px;background:#fff;z-index:3;pointer-events:none}
+  section{border:1px solid var(--line);border-radius:10px;margin-bottom:10px;background:var(--panel);overflow:hidden}
+  section>h2{margin:0;padding:9px 13px;font-size:12px;letter-spacing:.08em;text-transform:uppercase;color:var(--txt);cursor:pointer;display:flex;justify-content:space-between;align-items:center;background:#1b212b}
+  section>h2 .sub{color:var(--mut);font-weight:400;letter-spacing:0;text-transform:none;font-size:12px}
+  .body{padding:10px 13px}
+  .body.collapsed{display:none}
+  table{width:100%;border-collapse:collapse;font-size:12.5px}
+  td,th{padding:4px 7px;border-bottom:1px solid var(--line);text-align:left;vertical-align:top}
+  th{color:var(--mut);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.05em}
+  tr.cur{background:#1d2530}
+  .t{color:var(--mut);font-variant-numeric:tabular-nums;white-space:nowrap}
+  .ll{color:var(--L)} .rr{color:var(--R)} .ll.na,.rr.na{color:var(--na);font-style:italic}
+  .prov{font-size:10px;color:var(--mut)}
+  .row-click{cursor:pointer}
+  code{background:#21262d;padding:1px 5px;border-radius:5px;font-size:12px}
+  .kv{color:var(--mut)} .kv b{color:var(--txt);font-weight:600}
+  .chip{display:inline-block;font-size:11px;padding:1px 7px;border-radius:999px;border:1px solid var(--line);margin:2px 3px 0 0;color:var(--mut)}
+  .flag{color:var(--acc)} .empty{color:var(--mut);font-style:italic}
+  .think{color:var(--mut);font-size:12px}
+  .legend span{display:inline-block;margin-right:10px;font-size:11px;color:var(--mut)}
+  .sw{display:inline-block;width:10px;height:10px;border-radius:2px;vertical-align:middle;margin-right:3px}
+</style>
+</head>
+<body>
+<header>
+  <h1>egoanno · facts-first</h1>
+  <select id="pick"></select>
+  <select id="ver" title="pipeline version — compare runs of the same clip"></select>
+  <span class="pill">dir <b id="dir">—</b></span>
+  <span class="pill">segments <b id="nseg">—</b></span>
+  <span class="pill">dur <b id="dur">—</b></span>
+  <span class="pill" id="qpill">qa <b id="nqa">—</b></span>
+  <span class="pill" id="gpill">gate <b id="gv">—</b></span>
+</header>
+
+<div class="wrap">
+  <div class="leftcol">
+    <video id="vid" controls preload="auto"></video>
+    <div class="goal" id="goal"></div>
+    <div class="now">
+      <div class="hand L"><div class="tag">Left hand</div><div class="lab" id="curL">—</div></div>
+      <div class="hand R"><div class="tag">Right hand</div><div class="lab" id="curR">—</div></div>
+    </div>
+    <div class="tl" id="tl"><div class="ph" id="phh" style="left:0"></div></div>
+    <div class="legend" style="margin-top:7px" id="legend"></div>
+  </div>
+
+  <div id="panels"></div>
+</div>
+
+<script>
+const $=s=>document.querySelector(s);
+const esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
+const isNA=s=>!s||String(s).trim().toUpperCase()==='N/A';
+const f1=t=>(+t).toFixed(1)+'s';
+const PROV={dense_grid:'#30363d',transition:'#1f6feb',v49_segment:'#238636',
+  seg_reconcile:'#8957e5',gate_seam_merge:'#d29922',fresh_eye:'#db61a2',
+  segment:'#30363d',cycle_template:'#30363d'};
+const shortLab=s=>{const r=(!s.right||/^n\/a$/i.test(s.right))?s.left:s.right;
+  return isNA(r)?'·':String(r).split(/\s+/).slice(0,2).join(' ');};
+let EP=null,SEGS=[],DUR=0,CLIPS=[],CUR=null;
+
+async function loadManifest(){
+  let mani={clips:[]};
+  try{ mani=await (await fetch('factsfirst_manifest.json?_='+Date.now())).json(); }catch(e){}
+  CLIPS=mani.clips||[];
+  const pick=$('#pick'); pick.innerHTML='';
+  if(!CLIPS.length){ pick.innerHTML='<option>no facts-first episodes yet</option>'; return; }
+  CLIPS.forEach((c,i)=>{ const o=document.createElement('option'); o.value=i; o.textContent=c.clip; pick.appendChild(o); });
+  pick.onchange=()=>selClip(+pick.value);
+  selClip(0);
+}
+
+function selClip(i){
+  CUR=CLIPS[i]; const versions=CUR.versions||[{ver:'?',episode:CUR.episode,video:CUR.video}];
+  const vs=$('#ver'); vs.innerHTML='';
+  versions.forEach((v,j)=>{ const o=document.createElement('option'); o.value=j; o.textContent=v.ver; vs.appendChild(o); });
+  const last=versions.length-1; vs.value=last;        // default to the newest version
+  vs.onchange=()=>loadClip(versions[+vs.value]);
+  loadClip(versions[last]);
+}
+
+async function loadClip(c){
+  EP=await (await fetch(c.episode+'?_='+Date.now())).json();
+  SEGS=EP.segments||[];
+  $('#dir').textContent=EP.direction||'—';
+  $('#nseg').textContent=SEGS.length;
+  $('#dur').textContent=f1(EP.duration_sec||0);
+  const qn=(EP._qa&&EP._qa.violations?EP._qa.violations.length:(EP._qa||[]).length);
+  $('#nqa').textContent=qn; $('#qpill').className='pill'+(qn?' bad':' good');
+  $('#gv').textContent=EP._gate_quality||EP._purpose_verdict||'—';
+  $('#goal').innerHTML='<b>Goal:</b> '+esc(EP.goal||'');
+  const v=$('#vid'); v.src=c.video; v.load();
+  buildTimeline(); buildPanels();
+  v.ontimeupdate=tick; v.onloadedmetadata=()=>{DUR=v.duration||EP.duration_sec;};
+}
+
+function buildTimeline(){
+  const tl=$('#tl'), total=EP.duration_sec||1;
+  tl.querySelectorAll('.seg').forEach(e=>e.remove());
+  SEGS.forEach((s,i)=>{
+    const d=document.createElement('div'); d.className='seg'; d.dataset.i=i;
+    d.style.left=(100*s.start_sec/total)+'%'; d.style.width=(100*(s.end_sec-s.start_sec)/total)+'%';
+    d.style.background=PROV[s.boundary_provenance]||'#30363d';
+    d.innerHTML='<span>'+(i+1)+' '+esc(shortLab(s))+'</span>';
+    d.title=`#${i+1} [${f1(s.start_sec)}-${f1(s.end_sec)}]\nL: ${s.left}\nR: ${s.right}`;
+    d.onclick=()=>{$('#vid').currentTime=s.start_sec+0.02;};
+    tl.appendChild(d);
+  });
+  tl.onclick=e=>{ if(e.target.classList.contains('seg'))return;
+    const r=tl.getBoundingClientRect(); $('#vid').currentTime=(e.clientX-r.left)/r.width*(EP.duration_sec||0); };
+  const seen=[...new Set(SEGS.map(s=>s.boundary_provenance))];
+  $('#legend').innerHTML=seen.map(p=>`<span><i class="sw" style="background:${PROV[p]||'#30363d'}"></i>${esc(p)}</span>`).join('');
+}
+
+function sect(title,sub,inner,open){
+  return `<section><h2 data-t onclick="this.nextElementSibling.classList.toggle('collapsed')">
+    <span>${title}</span><span class="sub">${sub||''}</span></h2>
+    <div class="body${open?'':' collapsed'}">${inner}</div></section>`;
+}
+function trackTbl(tr){
+  let h='';
+  for(const hand of ['left','right']){
+    const ivs=(tr&&tr[hand])||[];
+    h+=`<div style="margin:4px 0 2px"><b style="color:${hand=='left'?'var(--L)':'var(--R)'}">${hand.toUpperCase()}</b> · ${ivs.length} intervals</div>`;
+    h+= ivs.length? '<table>'+ivs.map(iv=>`<tr><td class="t">${f1(iv.start_sec)}–${f1(iv.end_sec)}</td><td>${esc(iv.interacting_with)}</td></tr>`).join('')+'</table>' : '<div class="empty">none</div>';
+  }
+  return h;
+}
+
+function buildPanels(){
+  const segTrace=EP._seg_trace||[];
+  const flagsBy={}; (EP._flags||[]).forEach(f=>{(flagsBy[f.seg]=flagsBy[f.seg]||[]).push(f);});
+  const segRows=SEGS.map((s,i)=>{
+    const fl=(flagsBy[i+1]||[]).map(f=>`⚑${esc(f.type)}`).join(' ');
+    const think=(segTrace[i]&&segTrace[i].label_think)||'';
+    return `<tr class="row-click" data-i="${i}" onclick="document.getElementById('vid').currentTime=${s.start_sec}+0.02">
+      <td class="t">#${i+1}<br>${f1(s.start_sec)}<br>${f1(s.end_sec)}</td>
+      <td><div class="ll ${isNA(s.left)?'na':''}">L · ${esc(s.left)}</div>
+          <div class="rr ${isNA(s.right)?'na':''}">R · ${esc(s.right)}</div>
+          <div class="prov">${esc(s.boundary_provenance)} · conf ${s.confidence} ${fl?'· <span class=flag>'+fl+'</span>':''}</div>
+          ${think?`<div class="think">${esc(think)}</div>`:''}</td></tr>`;
+  }).join('');
+
+  const tr=EP._track||{left:[],right:[]};
+  const trans=EP._transitions||[];
+  const bs=EP._direction_burst_summary||{};
+  const br=EP._bursts_reduced||[];
+  const objs=EP.objects||[];
+  const qa=(EP._qa&&EP._qa.violations)||EP._qa||[];
+
+  // panels in CHRONOLOGICAL pipeline order: step 1 (facts) -> last step (fresh-eye)
+  const cf=EP._contact_frames||[];
+  const stepN=Math.max(1,Math.round(cf.length/12));
+  const cfSamp=cf.filter((_,k)=>k%stepN===0).slice(0,14);
+  const cfTbl=cfSamp.length?'<table><thead><tr><th>t</th><th>foreground</th><th>background</th><th>L</th><th>R</th></tr></thead>'+
+    cfSamp.map(fr=>`<tr><td class="t">${f1(fr.t)}</td><td>${esc(fr.foreground||'')}</td><td>${esc(fr.background||'')}</td><td class="ll">${esc(fr.left_touching||'')}</td><td class="rr">${esc(fr.right_touching||'')}</td></tr>`).join('')+'</table>':'<div class="empty">no per-frame facts</div>';
+  const feSegs=SEGS.filter(s=>s.boundary_provenance==='fresh_eye').length;
+
+  let html='';
+  // STEP 1a — objects + contact track (ground truth)
+  html+=sect('Step 1a · objects + contact track (ground truth)',
+    objs.length+' objects · '+cf.length+' frames',
+    `<div class="kv"><b>objects:</b> ${objs.map(o=>`<span class="chip">${esc(o.name)}${o.colour?' ('+esc(o.colour)+')':''}</span>`).join('')}</div>
+     <div style="margin-top:8px"><b class="kv">per-frame facts (fg / bg / contact, sampled):</b>${cfTbl}</div>
+     <div style="margin-top:8px">${trackTbl(tr)}</div>`);
+  // STEP 1c — transitions
+  html+=sect('Step 1c · transitions (place/pickup/handoff)',trans.length+' events',
+    trans.length?'<table>'+trans.map(e=>`<tr><td class="t">${f1(e.t)}</td><td>${esc(e.hand)} · <b>${esc(e.kind)}</b> · ${esc(e.object||'')}</td></tr>`).join('')+'</table>':'<div class="empty">none detected</div>');
+  // STEP 2 — rotation bursts
+  html+=sect('Step 2 · rotation bursts + reduce','claude opus · deterministic reduce',
+    `<div class="kv">summary: ${Object.entries(bs).map(([k,v])=>`<span class="chip">${esc(k)}=${esc(JSON.stringify(v))}</span>`).join('')||'<span class=empty>none</span>'}</div>
+     <div class="kv" style="margin-top:6px"><b>decisive verdicts:</b></div>
+     ${br.length?'<div>'+br.map(b=>`<span class="chip">${esc(b)}</span>`).join('')+'</div>':'<div class="empty">none</div>'}`);
+  // STEP 3 — direction
+  html+=sect('Step 3 · direction',EP.direction,
+    `<div class="kv"><b>direction:</b> ${esc(EP.direction)} · <b>phase switch:</b> ${EP.phase_switch_sec==null?'none':f1(EP.phase_switch_sec)}</div>
+     <div class="kv" style="margin-top:4px"><b>derived goal:</b> ${esc(EP.goal)}</div>`);
+  // STEP 4 — segments + labels (the result) — open
+  html+=sect('Step 4 · segments + labels (result)',SEGS.length+' segments',
+    `<table><thead><tr><th>seg</th><th>left / right · origin</th></tr></thead><tbody id="segbody">${segRows}</tbody></table>`,true);
+  // STEP 4d — verifier flags (template_match + neighbor_review + analysis)
+  html+=sect('Step 4d · verifier flags',(EP._flags||[]).length+' flags',
+    (EP._flags||[]).length?'<table>'+(EP._flags||[]).map(f=>`<tr><td class="t">seg#${f.seg}</td><td><b>${esc(f.type)}</b> <span class=prov>(${esc(f.raised_by)})</span><br>${esc(f.detail)}</td></tr>`).join('')+'</table>':'<div class="empty">none</div>');
+  // STEP 4e — code analysis (advisory, deterministic)
+  html+=sect('Step 4e · code analysis (advisory)',(EP._flags||[]).filter(f=>f.raised_by==='analysis').length+' flags',
+    `<div class="kv" style="white-space:pre-wrap;font-size:12px;line-height:1.5">${esc(EP._analysis_report)||'<span class=empty>none</span>'}</div>`);
+  // STEP 5 — gate + QA
+  html+=sect('Step 5 · gate + QA','claude opus',
+    `<div class="kv">purpose (<b>${esc(EP._purpose_verdict)}</b>): ${esc(EP.goal)}</div>
+     <div class="kv" style="margin-top:5px"><b>findings:</b> ${esc(EP._gate_findings)||'<span class=empty>none</span>'}</div>
+     <div class="kv" style="margin-top:7px"><b>QA needs-review (${qa.length}):</b></div>
+     ${qa.length?'<table>'+qa.map(v=>`<tr><td class="t">seg#${v.seg}</td><td>${esc(v.code)} · ${esc(v.hand)} — ${esc(v.detail)}</td></tr>`).join('')+'</table>':'<div class="empty">no deterministic conflicts</div>'}`);
+  // STEP 6 — fresh-eye (final, context-free review)
+  html+=sect('Step 6 · fresh-eye (final, context-free)',feSegs?('rewrote '+feSegs+' segs'):'',
+    `<div class="kv">${esc(EP._fresh_eye)||'<span class=empty>fresh-eye left the timeline unchanged or did not run</span>'}</div>`);
+
+  $('#panels').innerHTML=html;
+}
+
+function curSeg(t){ return SEGS.findIndex(s=>t>=s.start_sec-1e-3&&t<s.end_sec); }
+function tick(){
+  const v=$('#vid'),t=v.currentTime,total=EP.duration_sec||v.duration||1,i=curSeg(t),s=SEGS[i];
+  $('#phh').style.left=(100*t/total)+'%';
+  const L=$('#curL'),R=$('#curR');
+  L.textContent=s?s.left:'—'; L.className='lab'+(s&&isNA(s.left)?' na':'');
+  R.textContent=s?s.right:'—'; R.className='lab'+(s&&isNA(s.right)?' na':'');
+  document.querySelectorAll('.tl .seg').forEach(e=>e.classList.toggle('cur',+e.dataset.i===i));
+  // highlight the current segment row, but do NOT scroll the page (it would fight
+  // the user scrolling up to the video). The sticky video + live L/R panel track it.
+  document.querySelectorAll('#segbody tr').forEach(e=>e.classList.toggle('cur',+e.dataset.i===i));
+}
+loadManifest();
+</script>
+</body>
+</html>

@@ -82,7 +82,7 @@ def write_factsfirst_manifest():
     for stem, vers in sorted(groups.items()):
         vers.sort(key=lambda v: v["ver"])
         clips.append({"clip": stem.split("-")[0] + "…", "stem": stem, "versions": vers})
-    out = EGO / "viewer" / "factsfirst_manifest.json"
+    out = EGO / "factsfirst" / "factsfirst_manifest.json"   # lives with the viewer (in-repo)
     out.write_text(json.dumps({"clips": clips}, ensure_ascii=False, indent=2))
     nver = sum(len(c["versions"]) for c in clips)
     print(f"factsfirst manifest -> {out} ({len(clips)} clips, {nver} versions)")
