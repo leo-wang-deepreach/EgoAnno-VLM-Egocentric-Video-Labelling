@@ -70,6 +70,33 @@ def _spans(bounds: list[float]) -> list[tuple[float, float]]:
     return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
 
+def _parallel(fn, items, levels=(8, 6, 4), wd: Path | None = None, tag: str = ""):
+    """Run fn(item) concurrently, STARTING at levels[0] workers; any item whose fn raises
+    is retried at the next-lower worker level (graceful rate-limit fallback 8 -> 6 -> 4).
+    Returns results in input order; an item that fails at every level becomes None."""
+    items = list(items)
+    results: dict = {}
+    pending = list(enumerate(items))
+    for li, lvl in enumerate(levels):
+        if not pending:
+            break
+        nxt = []
+        with cf.ThreadPoolExecutor(max_workers=max(1, min(lvl, len(pending)))) as ex:
+            futs = {ex.submit(fn, it): idx for idx, it in pending}
+            for fu in cf.as_completed(futs):
+                idx = futs[fu]
+                try:
+                    results[idx] = fu.result()
+                except Exception:
+                    nxt.append((idx, items[idx]))
+        if nxt and wd is not None:
+            nextlvl = levels[li + 1] if li + 1 < len(levels) else None
+            _log(wd, f"{tag}: {len(nxt)} call(s) failed at {lvl} workers"
+                    + (f" -> retry at {nextlvl}" if nextlvl else " -> gave up"))
+        pending = nxt
+    return [results.get(i) for i in range(len(items))]
+
+
 # =========================================================================== #
 #  PHASE 1 — the fact layer                                                    #
 # =========================================================================== #
@@ -127,11 +154,8 @@ def phase1_transitions(s: ClipState, system: str, wd: Path, hint: str = ""):
         prompt = _p("transition_window.txt", WA=round(wa, 1), WB=round(wb, 1))
         if hint:
             prompt += f"\n\nReviewer hint about likely missed transitions: {hint}"
-        try:
-            r = claude_call(prompt, frames, system, SC.WINDOW_TRANSITIONS,
-                            model=CLAUDE_GATE, max_tokens=1500)
-        except RuntimeError:
-            return []
+        r = claude_call(prompt, frames, system, SC.WINDOW_TRANSITIONS,
+                        model=CLAUDE_GATE, max_tokens=1500)   # raises -> _parallel retries
         out = []
         for e in r.get("events", []):
             tt = e.get("t")
@@ -140,9 +164,8 @@ def phase1_transitions(s: ClipState, system: str, wd: Path, hint: str = ""):
         return out
 
     allev = []
-    with cf.ThreadPoolExecutor(max_workers=4) as ex:
-        for evs in ex.map(_one, wins):
-            allev.extend(evs)
+    for evs in _parallel(_one, wins, wd=wd, tag="P1c transition scan"):
+        allev.extend(evs or [])                            # None (failed all levels) -> skip
     # Keep the initial pick and final place (the user wants them). Only drop edge HAND-OFFS
     # (a hand-off at t=0 is the spurious "receive/give" artifact); keep place/pickup at edges.
     def _edge_ok(e):
@@ -402,14 +425,16 @@ def label_segments(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
                        fps=FPS_LABEL, max_tokens=2000)
         return i, out
 
-    with cf.ThreadPoolExecutor(max_workers=4) as ex:
-        for i, out in ex.map(_one, todo):
-            seg = s.segments[i]
-            seg.left = out.get("left", "N/A") or "N/A"
-            seg.right = out.get("right", "N/A") or "N/A"
-            seg.draft = {"labeled": True, "label_think": out.get("think", ""),
-                         "label": {"left": seg.left, "right": seg.right},
-                         "origin": seg.boundary_provenance}
+    for r in _parallel(_one, todo, wd=wd, tag="P4b label"):
+        if r is None:                                  # all worker-levels failed for it
+            continue
+        i, out = r
+        seg = s.segments[i]
+        seg.left = out.get("left", "N/A") or "N/A"
+        seg.right = out.get("right", "N/A") or "N/A"
+        seg.draft = {"labeled": True, "label_think": out.get("think", ""),
+                     "label": {"left": seg.left, "right": seg.right},
+                     "origin": seg.boundary_provenance}
 
 
 def seg_reconcile_pass(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
@@ -426,20 +451,19 @@ def seg_reconcile_pass(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
         nfr = int(round((seg.end - seg.start) * FPS_SEGMENT))
         prompt = _p("seg_reconcile.txt", N=nfr, A=round(seg.start, 1), B=round(seg.end, 1),
                     GOAL=s.goal or "(unknown)", LEFT=seg.left, RIGHT=seg.right)
-        try:
-            r = gv.watch(prompt, system, SC.SEG_RECONCILE, a=seg.start, b=seg.end,
-                         fps=FPS_SEGMENT, max_tokens=1500)
-        except RuntimeError:
-            return i, []
+        r = gv.watch(prompt, system, SC.SEG_RECONCILE, a=seg.start, b=seg.end,
+                     fps=FPS_SEGMENT, max_tokens=1500)      # raises -> _parallel retries
         cuts = sorted(float(x) for x in r.get("boundaries", [])
                       if x is not None and seg.start + 0.3 < float(x) < seg.end - 0.3)
         return i, cuts
 
     results = {}
-    with cf.ThreadPoolExecutor(max_workers=4) as ex:
-        for i, cuts in ex.map(_one, list(enumerate(s.segments))):
-            if cuts:
-                results[i] = cuts
+    for r in _parallel(_one, list(enumerate(s.segments)), wd=wd, tag="P4c seg_reconcile"):
+        if r is None:
+            continue
+        i, cuts = r
+        if cuts:
+            results[i] = cuts
     if not results:
         _log(wd, "P4c seg_reconcile: no splits")
         return False
