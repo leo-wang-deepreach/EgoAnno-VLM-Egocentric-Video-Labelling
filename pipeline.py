@@ -41,8 +41,8 @@ FPS_DIRECTION = 10.0      # user override: dense whole-clip read for direction
 FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visible
 FPS_LABEL = 10.0          # per-segment NATIVE labeling / focused refine
 FPS_EDGE = 30.0           # transition scan + bursts stay 30fps (brief events need it)
-FPS_GATE = 10.0           # gate at 10fps; cap 300 frames (opus-4-8 allows 600/req, 32MB)
-FPS_FRESH = 10.0          # fresh-eye at 10fps; cap 300 frames (true 10fps for <=30s clips)
+FPS_GATE = 10.0           # gate at 10fps; cap 600 frames, res auto-scaled to fit 32MB/req
+FPS_FRESH = 10.0          # fresh-eye at 10fps; cap 600 frames, res auto-scaled to fit 32MB
 CONTACT_WIN = 20.0        # seconds per 10fps contact-track window
 EDGE_HALF = 0.6           # edge verifier half-window
 LABEL_CTX = 1.0           # neighbor overlap for the labeler
@@ -98,6 +98,18 @@ def _parallel(fn, items, levels=(8, 6, 4), wd: Path | None = None, tag: str = ""
                     + (f" -> retry at {nextlvl}" if nextlvl else " -> gave up"))
         pending = nxt
     return [results.get(i) for i in range(len(items))]
+
+
+def _safe_side(duration: float, fps: float, cap: int = 600, base: int = 720) -> int:
+    """Pick a per-frame max pixel side so a whole-clip strip of up to `cap` frames stays
+    under the Messages API 32MB request limit (after base64 ~+37%). ~220 frames of 720px
+    JPEG fit; beyond that we shrink the frames (sqrt scaling) rather than drop the cap —
+    so a 7-minute clip sends all 600 frames at lower resolution instead of 413-failing."""
+    n = min(int(fps * duration) + 1, cap)
+    fit = 220                                   # 720px frames that fit under ~30MB base64
+    if n <= fit:
+        return base
+    return max(384, int(base * (fit / n) ** 0.5))
 
 
 # =========================================================================== #
@@ -508,7 +520,8 @@ def delete_only_critic(s: ClipState, system: str, wd: Path):
         return
     s.ran.add("merge_critic")
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=300)
+                             ctx=0.0, cap_frames=600,
+                             max_side=_safe_side(s.duration, FPS_GATE))
     r = claude_call(_p("merge_critic.txt", DIRECTION=s.direction,
                        TIMELINE=s.timeline_text()),
                     frames, system, SC.MERGE_CRITIC, model=CLAUDE_GATE)
@@ -648,7 +661,8 @@ def phase4(s: ClipState, gv: GeminiVideo, gframes_pro: GeminiFrames,
 # =========================================================================== #
 def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     frames, _ = render_strip(s.clocked, 0.0, s.duration, FPS_GATE, s.track, str(wd),
-                             ctx=0.0, cap_frames=300)
+                             ctx=0.0, cap_frames=600,
+                             max_side=_safe_side(s.duration, FPS_GATE))
     flagged = s.flags_text()
     r = claude_call(_p("opus_final.txt", DIRECTION=s.direction, GOAL=s.goal,
                        TRACK=s.track_lines(),
@@ -714,7 +728,7 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
     if not s.segments:
         return
     frames = render_labeled(s.clocked, s.segments, FPS_FRESH, str(wd),
-                            max_side=720, cap_frames=300)
+                            max_side=_safe_side(s.duration, FPS_FRESH), cap_frames=600)
     if not frames:
         return
     try:
