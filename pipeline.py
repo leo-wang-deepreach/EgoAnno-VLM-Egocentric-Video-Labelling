@@ -649,12 +649,18 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
     #  ONE TIMELINE, refined step by step. Facts computed once; the dense 0.1s      #
     #  facts ARE the starting timeline; each stage rewrites it in place.            #
     # ============================================================================ #
+    # INVARIANT: every stage emits the full timeline (via _snap), even if unchanged — so
+    # each stage is a guaranteed timeline output, one row in the trace.
     phase1_contact(s, gv, system, wd)                 # STEP 1A: objects + per-0.1s contact
     _seed_timeline(s)                                 # the dense facts ARE the timeline
     _snap(s, "1A seed (0.1s contact facts)", wd)
     phase1_transitions(s, system, wd)                 # STEP 1C: transitions annotate it
+    _snap(s, "1C transitions (annotate)", wd)
     phase2_bursts(s, system, wd)                      # STEP 2: rotation bursts
+    _snap(s, "2 bursts (annotate)", wd)
     phase3_direction(s, gv, system, wd)               # STEP 3: direction + goal
+    _snap(s, "3 direction (annotate)", wd)
+    facts_snaps = list(s.stage_snapshots)             # preserved across the per-attempt reset
     _log(wd, f"facts ready: dir={s.direction}, {len(s.transitions)} transitions")
 
     # ---- RETRY LOOP over the refinement chain (keep BEST by gate verdict) ----
@@ -665,7 +671,7 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
                 + (f" (feedback: {feedback[:90]!r})" if feedback else "") + " ===")
         if attempt > 1 and feedback:
             phase1_transitions(s, system, wd, hint=feedback)   # focused re-scan
-        s.flags, s.ran, s.stage_snapshots = [], set(), []
+        s.flags, s.ran, s.stage_snapshots = [], set(), list(facts_snaps)
         label_and_collapse(s, gv, system, wd)         # STEP 4: collapse facts -> sentences
         _snap(s, "4 label + collapse", wd)
         refine_timeline(s, system, wd)                # STEP 5: verifier (model edit)
@@ -673,6 +679,7 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
         rep, afl = AN.analyze(s)                      # STEP 6: code analysis — READ ONLY
         s.analysis_report = rep
         s.flags.extend(afl)
+        _snap(s, "6 code-analysis (read-only, re-emit)", wd)
         _log(wd, f"6 code-analysis: +{len(afl)} advisory flags (no timeline change)")
         gate = phase5_gate(s, gv, system, wd)         # STEP 7: gate + QA (model edit)
         _snap(s, "7 gate + QA (model edit)", wd)
