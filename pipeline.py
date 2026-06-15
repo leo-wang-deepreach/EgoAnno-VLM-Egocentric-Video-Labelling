@@ -722,6 +722,75 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
 
 
 # =========================================================================== #
+#  FLAG ACTUATOR — wire detected transitions -> deterministic edits            #
+# =========================================================================== #
+def actuate_transitions(s: ClipState, wd: Path):
+    """Close the flag->fix gap: the gate used to DISMISS detected place/pickups, leaving
+    them mislabeled as 'hold'. This applies them deterministically (no model call, no gate
+    veto): (1) if a detected transition is SWALLOWED inside a segment with no boundary,
+    split there; (2) force the ACTING hand's label of the (short) transition segment to
+    that action — 'place/pick up the <object>'. Object name comes from the detection."""
+    trans = [e for e in s.transitions if e.get("t") is not None
+             and e.get("kind") in ("place", "pickup", "handoff")
+             and 0.3 < float(e["t"]) < s.duration - 0.3]
+    if not trans or not s.segments:
+        return
+    verbs = {"place": "place", "pickup": "pick up", "handoff": "hand off"}
+    # 1. SPLIT swallowed transitions (no boundary within 0.5s) out of their segment
+    bounds = {round(g.start, 2) for g in s.segments} | {round(g.end, 2) for g in s.segments}
+    new_cuts = sorted({round(float(e["t"]), 2) for e in trans
+                       if not any(abs(float(e["t"]) - b) <= 0.5 for b in bounds)})
+    if new_cuts:
+        olds = s.segments
+        allb = sorted(set([0.0] + [round(g.end, 2) for g in olds[:-1]]
+                          + new_cuts + [round(s.duration, 2)]))
+        rebuilt = []
+        for a, b in _spans(allb):
+            if b - a < 0.05:
+                continue
+            mid = (a + b) / 2
+            src = next((g for g in olds if g.start - 0.05 <= mid <= g.end + 0.05), olds[-1])
+            ns = Segment(start=round(a, 2), end=round(b, 2), left=src.left, right=src.right)
+            ns.boundary_provenance = "actuator_split"
+            rebuilt.append(ns)
+        s.segments = rebuilt
+        _log(wd, f"P-act: split {len(new_cuts)} swallowed transition(s) at {new_cuts} "
+                f"-> {len(rebuilt)} segs")
+
+    # 2. FORCE the acting-hand label at each transition (short transition segs only)
+    def _seg_at(t, kind):
+        # a place culminates AT t -> the segment ENDING there; a pickup begins AT t ->
+        # the segment STARTING there; otherwise the segment containing t.
+        if kind == "place":
+            g = next((g for g in s.segments if abs(g.end - t) <= 0.6), None)
+            if g:
+                return g
+        if kind in ("pickup", "handoff"):
+            g = next((g for g in s.segments if abs(g.start - t) <= 0.6), None)
+            if g:
+                return g
+        return next((g for g in s.segments if g.start - 0.05 <= t <= g.end + 0.05), None)
+
+    n = 0
+    for e in trans:
+        t = float(e["t"]); seg = _seg_at(t, e["kind"])
+        if not seg or (seg.end - seg.start) > 4.0:        # never stamp a long work span
+            continue
+        obj = (e.get("object") or "the object").strip()
+        lab = f"{verbs[e['kind']]} the {obj}"
+        hands = ["left", "right"] if e.get("hand") == "both" else [e.get("hand")]
+        for h in hands:
+            if h not in ("left", "right"):
+                continue
+            cur = (getattr(seg, h) or "").lower()
+            if not cur.startswith(verbs[e["kind"]].split()[0]):   # not already this action
+                setattr(seg, h, lab); n += 1
+    merge_identical_labels(s, wd)
+    s.track = derive_track_from_labels(s.segments)
+    _log(wd, f"P-act: enforced {n} transition label(s) from detected place/pickup")
+
+
+# =========================================================================== #
 #  PHASE 6 — fresh-eye final review (context-free)                            #
 # =========================================================================== #
 def fresh_eye(s: ClipState, system: str, wd: Path):
@@ -829,6 +898,10 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
     s.segments, s.flags, s.track, s.ran = best[1], best[2], best[3], set()
     s.stage_snapshots = []                            # trace the EXPORTED lineage only
     _snap(s, f"P4+P5 accepted (attempt {best[4]}: labeler + gate)", wd)
+
+    # ---- WIRE FLAGS -> EDITS: deterministically apply detected transitions ----
+    actuate_transitions(s, wd)                        # split + relabel place/pickup (no gate veto)
+    _snap(s, "flag actuator (transitions -> labels)", wd)
 
     # ---- FINAL polish + audit, ONCE on the accepted timeline (before export) ----
     delete_only_critic(s, system, wd)                 # merge any over-split runs
