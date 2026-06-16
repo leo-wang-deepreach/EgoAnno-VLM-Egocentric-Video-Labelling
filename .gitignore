@@ -42,6 +42,9 @@ ground_truth*/
 # ─── post-v18 experiments (kept local until promoted) ─────────────────────
 _experimental_v19_v21/
 
+# ─── local batch launcher (hardcodes private test-video paths) ────────────
+run_batch.sh
+
 # ─── os cruft ─────────────────────────────────────────────────────────────
 .DS_Store
 
