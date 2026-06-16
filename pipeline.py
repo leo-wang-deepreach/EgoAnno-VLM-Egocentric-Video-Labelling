@@ -787,4 +787,118 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
     system = (PROMPTS / "caption.system.txt").read_text()
 
     s = ClipState(video=video)
-    s.du
+    s.duration = probe_duration(video)
+    _log(wd, f"=== annotate {Path(video).name} ({s.duration:.1f}s) ===")
+
+    s.clocked = str(wd / "clocked.mp4")
+    burn_clock(video, s.clocked)
+    _log(wd, "clock burned (audio off) -> upload to Gemini File API")
+
+    gv = GeminiVideo(GEMINI_NATIVE)              # gemini-3.1-pro: facts + native label
+    gv.upload(s.clocked)
+    gframes_pro = GeminiFrames(GEMINI_NATIVE)    # pro frames: template_match (text only)
+    _log(wd, "video ACTIVE")                     # bursts/edge/gate = Claude opus (no flash)
+
+    # ============================================================================ #
+    #  ONE TIMELINE, refined step by step. Facts computed once; the dense 0.1s      #
+    #  facts ARE the starting timeline; each stage rewrites it in place.            #
+    # ============================================================================ #
+    # INVARIANT: every stage emits the full timeline (via _snap), even if unchanged — so
+    # each stage is a guaranteed timeline output, one row in the trace.
+    phase1_contact(s, gv, system, wd)                 # STEP 1A: objects + per-0.1s contact
+    _seed_timeline(s)                                 # the dense facts ARE the timeline
+    _snap(s, "1A seed (0.1s contact facts)", wd)
+    phase1_transitions(s, system, wd)                 # STEP 1C: transitions annotate it
+    _snap(s, "1C transitions (annotate)", wd)
+    phase2_bursts(s, system, wd)                      # STEP 2: rotation bursts
+    _snap(s, "2 bursts (annotate)", wd)
+    phase3_direction(s, gv, system, wd)               # STEP 3: direction + goal
+    _snap(s, "3 direction (annotate)", wd)
+    facts_snaps = list(s.stage_snapshots)             # preserved across the per-attempt reset
+    _log(wd, f"facts ready: dir={s.direction}, {len(s.transitions)} transitions")
+
+    # ---- RETRY LOOP over the refinement chain (keep BEST by gate verdict) ----
+    import copy as _copy
+    feedback, best = "", None
+    for attempt in range(1, max_attempts + 1):
+        _log(wd, f"=== ATTEMPT {attempt}/{max_attempts}"
+                + (f" (feedback: {feedback[:90]!r})" if feedback else "") + " ===")
+        if attempt > 1 and feedback:
+            phase1_transitions(s, system, wd, hint=feedback)   # focused re-scan
+        s.flags, s.ran, s.stage_snapshots = [], set(), list(facts_snaps)
+        # the gate's detailed punch-list flows straight into the labeler on a rerun, so the
+        # next attempt FIXES the named defects rather than regenerating the same labels
+        label_and_collapse(s, gv, system, wd,
+                           feedback=feedback if attempt > 1 else "")  # STEP 4
+        _snap(s, "4 label + collapse", wd)
+        refine_timeline(s, system, wd)                # STEP 5: verifier (model edit)
+        _snap(s, "5 verifier (consistency edit)", wd)
+        rep, afl = AN.analyze(s)                      # STEP 6: code analysis — READ ONLY
+        s.analysis_report = rep
+        s.flags.extend(afl)
+        _snap(s, "6 code-analysis (read-only, re-emit)", wd)
+        _log(wd, f"6 code-analysis: +{len(afl)} advisory flags (no timeline change)")
+        gate = phase5_gate(s, gv, system, wd)         # STEP 7: gate + QA (model edit)
+        _snap(s, "7 gate + QA (model edit)", wd)
+        verdict = gate.get("quality_verdict", "good")
+        # Score (lower=better): gate-good, then fewest HARD flags (contradictions of the
+        # reliable 1A contact — N/A on a gripping hand, object the hand never touched),
+        # then fewest soft flags, then MORE segments. The hard term ranks the attempt most
+        # consistent with the contact facts ABOVE a raw flag-count (which misranked the
+        # thread/N-A timeline above the correct thread/pickup one on e333dda6).
+        _HARD = {"idle_but_holding?", "contact_says_idle?", "object_unsupported?",
+                 "frozen_across_transition?", "dup_across_transition?"}
+        hard = sum(1 for f in s.flags if f.type in _HARD)
+        soft = len(s.flags) - hard
+        # Tiebreaker BOUNDED BY the detected transitions (fix: stop rewarding fragmentation).
+        # The locked transitions imply ~expected segments; prefer the attempt whose count is
+        # CLOSEST to that target, so a 28-seg over-cut can NEVER beat the correct 7-seg one
+        # (the old `-len(segments)` term did exactly the wrong thing). With NO transitions
+        # detected we have no count signal -> fall back to "more is better".
+        locked = _locked_transitions(s)
+        expected = len(locked) + 1
+        seg_term = abs(len(s.segments) - expected) if locked else -len(s.segments)
+        score = (0 if verdict == "good" else 1, hard, soft, seg_term)
+        if best is None or score < best[0]:
+            best = (score, _copy.deepcopy(s.segments), list(s.flags),
+                    _copy.deepcopy(s.track), attempt, list(s.stage_snapshots),
+                    s.analysis_report, s.gate_findings, s.purpose_verdict)
+        # CAP GRANULARITY: once every detected transition is already covered (count at or past
+        # the transition-implied target + slack), a further needs_rerun can only fragment —
+        # there is nothing real left to split. Stop and keep the best instead of chasing the
+        # gate's complaint into the 7->28 escalation.
+        capped = bool(locked) and attempt >= 2 and len(s.segments) > expected + 2
+        if verdict == "good" or attempt == max_attempts or capped:
+            why = "good" if verdict == "good" else ("granularity-capped" if capped else verdict)
+            _log(wd, f"=== quality={why} after attempt {attempt}; "
+                    f"best=attempt {best[4]} (score {best[0]}) -> accept ===")
+            break
+        feedback = (gate.get("rerun_feedback") or
+                    "Re-check for missed place/pickup/throw boundaries.")
+    # restore the best attempt
+    (s.segments, s.flags, s.track, _, s.stage_snapshots,
+     s.analysis_report, s.gate_findings, s.purpose_verdict) = best[1:]
+
+    # ---- STEP 8: fresh-eye final review (context-free), once on the best ----
+    # fresh-eye runs AFTER the gate, so its output is never re-graded. Guard it: if it
+    # INTRODUCES a structural defect (an identical-label pair straddling a transition, or a
+    # hand frozen across its own transition — the exact failures the strict gate rejects),
+    # revert to the vetted pre-fresh-eye timeline. Fresh-eye may improve, never regress.
+    _STRUCT8 = {"frozen_across_transition?", "dup_across_transition?"}
+    _pre_segs = _copy.deepcopy(s.segments)
+    _pre_track = _copy.deepcopy(s.track)
+    _pre_bad = sum(1 for f in AN.analyze(s)[1] if f.type in _STRUCT8)
+    fresh_eye(s, system, wd)
+    _post_bad = sum(1 for f in AN.analyze(s)[1] if f.type in _STRUCT8)
+    if _post_bad > _pre_bad:
+        _log(wd, f"P6 fresh-eye introduced {_post_bad - _pre_bad} structural defect(s) "
+                f"({_pre_bad}->{_post_bad}) -> REVERT to pre-fresh-eye timeline")
+        s.segments, s.track = _pre_segs, _pre_track
+        s.fresh_eye_note = (s.fresh_eye_note + " | REVERTED (introduced structural defect)").strip()
+    _snap(s, "8 fresh-eye (final, exported)", wd)
+
+    episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)
+    _log(wd, f"=== DONE {time.time()-t0:.0f}s | {len(s.segments)} segments, "
+            f"{len(episode['_qa']['violations'])} qa flags | usage: {USAGE.summary()} ===")
+    _log(wd, f"episode -> {out_path}")
+    return episode
