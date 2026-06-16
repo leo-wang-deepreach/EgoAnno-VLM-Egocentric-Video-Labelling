@@ -85,7 +85,15 @@ def extract_frames(video: str, a: float, dur: float, fps: float, max_side: int,
     files = sorted(glob.glob(os.path.join(sub, "f_*.jpg")))
     for i, f in enumerate(files):
         t = max(0.0, a) + (i + 0.5) / fps          # frame center time
-        out.append((round(t, 3), base64.b64encode(open(f, "rb").read()).decode()))
+        try:
+            data = open(f, "rb").read()
+        except OSError:
+            continue
+        # SKIP empty / truncated JPEGs (e.g. ffmpeg cut short by a full disk) — a single bad
+        # frame must never reach PIL and crash the whole run. Valid JPEG starts with FFD8.
+        if len(data) < 128 or data[:2] != b"\xff\xd8":
+            continue
+        out.append((round(t, 3), base64.b64encode(data).decode()))
     return out
 
 
@@ -194,8 +202,12 @@ def render_strip(clocked: str, a: float, b: float, fps: float, track: dict,
 
 def _overlay_labels(b64_jpeg: str, left: str, right: str) -> str:
     """Burn the CURRENTLY-ASSIGNED L/R labels onto a frame for the fresh-eye review:
-    'L: <left>' top-left, 'R: <right>' top-right, plus the L|/|R edge tabs."""
-    im = Image.open(BytesIO(base64.b64decode(b64_jpeg))).convert("RGB")
+    'L: <left>' top-left, 'R: <right>' top-right, plus the L|/|R edge tabs.
+    Returns None for an undecodable frame so the caller can skip it (never crash)."""
+    try:
+        im = Image.open(BytesIO(base64.b64decode(b64_jpeg))).convert("RGB")
+    except Exception:
+        return None
     W, H = im.size
     d = ImageDraw.Draw(im)
     fnt = _font(max(16, H // 34))
@@ -232,5 +244,7 @@ def render_labeled(clocked: str, segments, fps: float, workdir: str,
     for t, b64 in raw:
         seg = next((s for s in segments if s.start - 0.05 <= t <= s.end + 0.05),
                    segments[-1])
-        out.append(_overlay_labels(b64, seg.left or "N/A", seg.right or "N/A"))
+        lab = _overlay_labels(b64, seg.left or "N/A", seg.right or "N/A")
+        if lab is not None:                         # skip any frame that failed to decode
+            out.append(lab)
     return out
