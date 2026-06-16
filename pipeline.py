@@ -112,7 +112,7 @@ def _snap(s: ClipState, stage: str, wd: Path | None = None):
             for x in s.segments]
     s.stage_snapshots.append({"stage": stage, "n": len(segs), "segs": segs})
     if wd is not None:
-        rows = " | ".join(f"#{i+1} {x['left']}/{x['right']}" for i, x in enumerate(segs))
+        rows = "  ".join(f"#{i+1} L:{x['left']} R:{x['right']}" for i, x in enumerate(segs))
         _log(wd, f"TRACE [{stage}] {len(segs)} segs: {rows}")
 
 
@@ -614,9 +614,14 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
         clean.append((max(0.0, a), min(s.duration, b),
                       str(seg.get("left") or "N/A"), str(seg.get("right") or "N/A")))
     clean.sort()
-    if len(clean) < 1 or (len(clean) == 1 and s.duration > 6):
-        s.fresh_eye_note = (f"rejected degenerate rewrite ({len(clean)} segs) — kept "
-                            f"timeline. notes: {str(r.get('notes',''))[:120]}")
+    n0 = len(s.segments)
+    # GUARD: fresh-eye may polish/merge a little, but a real "fix" never collapses the
+    # timeline by half. Reject a catastrophic over-merge (e.g. 24->3, 7->2) and keep the
+    # vetted timeline — this is the mega-segment failure sneaking in via the last step.
+    if len(clean) < 1 or (len(clean) == 1 and s.duration > 6) \
+            or (n0 >= 5 and len(clean) < 0.6 * n0):
+        s.fresh_eye_note = (f"rejected rewrite ({n0} -> {len(clean)} segs; >40% drop or "
+                            f"degenerate) — kept timeline. notes: {str(r.get('notes',''))[:120]}")
         _log(wd, f"P6 fresh-eye: {s.fresh_eye_note}")
         return
     rebuilt = []
@@ -695,7 +700,15 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
         gate = phase5_gate(s, gv, system, wd)         # STEP 7: gate + QA (model edit)
         _snap(s, "7 gate + QA (model edit)", wd)
         verdict = gate.get("quality_verdict", "good")
-        score = (0 if verdict == "good" else 1, len(s.flags), -len(s.segments))
+        # Score (lower=better): gate-good, then fewest HARD flags (contradictions of the
+        # reliable 1A contact — N/A on a gripping hand, object the hand never touched),
+        # then fewest soft flags, then MORE segments. The hard term ranks the attempt most
+        # consistent with the contact facts ABOVE a raw flag-count (which misranked the
+        # thread/N-A timeline above the correct thread/pickup one on e333dda6).
+        _HARD = {"idle_but_holding?", "contact_says_idle?", "object_unsupported?"}
+        hard = sum(1 for f in s.flags if f.type in _HARD)
+        soft = len(s.flags) - hard
+        score = (0 if verdict == "good" else 1, hard, soft, -len(s.segments))
         if best is None or score < best[0]:
             best = (score, _copy.deepcopy(s.segments), list(s.flags),
                     _copy.deepcopy(s.track), attempt, list(s.stage_snapshots),

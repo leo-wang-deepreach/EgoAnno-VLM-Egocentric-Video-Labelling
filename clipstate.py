@@ -25,8 +25,11 @@ class Segment:
     draft: dict = field(default_factory=dict)     # per-stage trace of this seg
 
     def as_row(self, i: int) -> str:
-        return (f"#{i+1} [{self.start:.1f}-{self.end:.1f}] "
-                f"L: {self.left} | R: {self.right}")
+        # Multi-line, explicitly L:/R: on their own lines — never a "left/right" slash,
+        # so the model can never confuse which hand is which.
+        return (f"#{i+1}  [{self.start:.1f}-{self.end:.1f}s]\n"
+                f"    L: {self.left}\n"
+                f"    R: {self.right}")
 
 
 @dataclass

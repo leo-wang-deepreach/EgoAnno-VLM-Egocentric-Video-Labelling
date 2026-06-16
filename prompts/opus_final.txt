@@ -7,7 +7,7 @@ Purpose hypothesis: <<GOAL>>
 Possession track (independent ground truth): <<TRACK>>
 Reduced rotation/role/color verdicts (decisive bursts only): <<BURSTS>>
 
-FINAL TIMELINE (numbered):
+FINAL TIMELINE (numbered; each segment is a block — "L:" = LEFT hand, "R:" = RIGHT hand, on their own lines):
 <<TIMELINE>>
 
 SEGMENTS PRE-FLAGGED FOR REVIEW (these are the ONLY labels you scrutinize — a neighbor-consistency reviewer and deterministic scans judged each suspicious: an object/part/color contradicting the surrounding cycle, a hand-role swap, an action breaking the local flow, a monotone run hiding a missed pick, or a track/label mismatch). Give EACH extra frame-level scrutiny; correct it if the frames disagree; leave it unchanged if it is right:

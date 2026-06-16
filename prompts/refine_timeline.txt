@@ -5,7 +5,7 @@ Task goal: <<GOAL>>
 RELIABLE per-hand possession facts (the 1A ground truth — which object each forearm holds or "empty" over time; your authority for who-holds-what and who-is-idle):
 <<CONTACT>>
 
-CURRENT TIMELINE (1-based; "#i [start-end] L: <left> | R: <right>"):
+CURRENT TIMELINE (1-based; each segment is a block — "L:" is the LEFT hand, "R:" is the RIGHT hand, on their own lines):
 <<TIMELINE>>
 
 === FIX (return the whole corrected timeline) ===
