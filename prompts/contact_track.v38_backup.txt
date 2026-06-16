@@ -1,0 +1,20 @@
+Watch this clip segment from t=<<A>>s to t=<<B>>s (first-person, two-handed manipulation; the TOP-RIGHT clock is the time authority — report seconds with one decimal). The segment is sampled at 10 fps.
+
+Your ONLY job is OBJECT-CONTACT TRACKING: for EACH hand, state which object it is holding / engaged with over time, as contiguous intervals. "Engaged with" = any working contact — gripping, supporting, pressing, pulling, carrying. Do NOT name the action and do NOT guess the task or any assembly/disassembly direction — report ONLY which object each hand holds. Facts only.
+
+Apply FOREARM L/R: first-person top-down, forearms enter from the bottom — the forearm entering from the frame's LEFT is the LEFT hand, from the RIGHT is the RIGHT hand. Track each hand separately through the whole segment; re-derive from the pixels and never swap when the hands cross.
+
+Name each object by a stable, specific visible identity — colour + form (e.g. "silver bolt", "blue cap", "clear plastic bag", "small silver nut"). Use the SAME name every time the same physical object appears. A joined unit is ONE object under a combined name (e.g. "bolt-nut unit"); once parts separate, name the piece each hand actually holds. In a fastening (threading/screwing one part onto another) the two hands usually hold DIFFERENT parts — a longer base in one, the smaller turned part in the other — name them distinctly.
+
+Rules:
+- "interacting_with" = the object name, or "empty" when the hand holds nothing, or "out of frame" when the forearm is not visible.
+- A NEW interval starts ONLY when the engaged object changes: the hand grips something new, releases it, a hand-to-hand transfer happens, or the held unit's identity changes. Read each change's time off the clock.
+- A real RELEASE — the hand sets its object down (the object stays, the hand opens) or hands it to the other hand — becomes "empty" at that instant and stays "empty" until the hand grips something again. Capture set-down and hand-off moments even if brief; a fresh grab from a pile is "empty" during the reach, then the new object once gripped (even if it looks identical to the last one).
+- Releasing something onto/into a container does NOT make the hand engaged with the container — after a release the hand is "empty".
+- It is completely normal for a hand to be "empty" for long stretches (e.g. while the OTHER hand works, or after setting a finished unit down).
+- RED FLAG: a hand reported holding the SAME object for the ENTIRE segment with no "empty" interval is almost always wrong — re-check whether it ever sets the object down, releases, or hands it off, and report that "empty" interval.
+- Intervals per hand must be CONTIGUOUS from <<A>>s to <<B>>s: each interval's start equals the previous interval's end, covering the whole segment with no gaps or overlaps.
+
+Raw JSON only:
+{"left": [{"start_sec": <number>, "end_sec": <number>, "interacting_with": "<object name | empty | out of frame>"}],
+ "right": [{"start_sec": <number>, "end_sec": <number>, "interacting_with": "<object name | empty | out of frame>"}]}

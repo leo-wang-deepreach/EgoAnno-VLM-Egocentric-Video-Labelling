@@ -22,7 +22,9 @@ Retired (v49 top-down path) lives under unused/.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import re
 import time
+from collections import Counter
 from pathlib import Path
 
 import analysis as AN
@@ -40,6 +42,7 @@ PROMPTS = HERE / "prompts"
 
 # frame budgets (facts-first; refine-heavy then label-heavy)
 FPS_CONTACT = 10.0
+CONTACT_SAMPLES = 3       # sample the 1A contact track N times + reconcile (cancels single-pass variance)
 FPS_TRANSITION = 10.0     # dense whole-clip read to catch brief place/pickup/handoff
 FPS_DIRECTION = 10.0      # user override: dense whole-clip read for direction
 FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visible
@@ -308,24 +311,42 @@ def _seed_timeline(s: ClipState):
 _EMPTY_NAMES = {"", "empty", "none", "out of frame", "n/a", "null", "-", "nothing"}
 
 
-def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
-    """STEP 1A — v49 HAND-OBJECT TRACK. Per window, the model returns each hand's
-    contiguous 'what it is holding' intervals at 10fps (no foreground/background, no
-    per-frame guessing — just which object each hand holds). Those STABLE intervals are
-    expanded into the internal 10fps contact frames the rest of the pipeline reads
-    (build_track / analysis / seed / dashboard all keep working), and the object catalogue
-    is derived from the interval names."""
-    wins = plan_windows(s.duration, CONTACT_WIN)
-    _log(wd, f"P1a hand-object track (v49): {len(wins)} window(s) @ {FPS_CONTACT}fps")
+# --- Stage-1A sample-and-reconcile -------------------------------------------- #
+# A single VLM pass over this fine-grained contact task is unstable run-to-run, so the
+# contact track is sampled CONTACT_SAMPLES times and reconciled by per-0.1s majority vote.
+_V_STOP = {"and", "the", "a", "an", "of", "with", "plus", "to", "into", "its", "on", "in", "or"}
+_V_FILLER = {"assembly", "assembled", "unit", "combined", "joined", "set", "piece", "pieces",
+             "two", "both", "together", "group", "bunch", "handful", "whole", "thing", "object"}
+_V_DESC = {"silver", "metal", "metallic", "steel", "grey", "gray", "shiny", "small", "large",
+           "clear", "single", "loose", "one", "another", "tiny", "little"}
 
+
+def _vkey(name: str):
+    """Grouping key for voting: empties -> ('N/A',); otherwise the sorted set of core nouns
+    (articles/fillers/generic descriptors dropped, singularised). So 'silver bolt' == 'bolt'
+    == 'bolts', but 'bolt and nut' stays DISTINCT from 'bolt'. A parsing aid, not judgement."""
+    n = (name or "").strip().lower()
+    if n in _EMPTY_NAMES:
+        return ("N/A",)
+    core = []
+    for t in re.findall(r"[a-z]+", n):
+        if t in _V_STOP or t in _V_FILLER or t in _V_DESC:
+            continue
+        if len(t) > 3 and t.endswith("s"):
+            t = t[:-1]
+        core.append(t)
+    core = sorted(set(core))
+    return tuple(core) if core else ("N/A",)
+
+
+def _contact_pass(gv: GeminiVideo, system: str, wd: Path, dur: float, wins) -> list[dict]:
+    """One full contact-track sample -> 10fps frames {t, left_touching, right_touching}."""
     def _one(win):
         a, b = win
         return gv.watch(_p("contact_track.txt", A=round(a, 1), B=round(b, 1)),
                         system, SC.CONTACT_TRACK, a=a, b=b, fps=FPS_CONTACT, max_tokens=8000)
 
     results = _parallel(_one, wins, wd=wd, tag="P1a contact_track")
-
-    # collect raw per-hand intervals across all windows (clipped to each window)
     raw = {"left": [], "right": []}
     for (a, b), r in zip(wins, results):
         if not r:
@@ -344,9 +365,6 @@ def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     for hand in ("left", "right"):
         raw[hand].sort()
 
-    # expand the intervals to 10fps frames so every downstream consumer (build_track,
-    # analysis cross-checks, _seed_timeline, dashboard) keeps working — now the frames are
-    # derived from STABLE intervals instead of independent per-frame guesses
     def _obj_at(ivs, t):
         for (sa, sb, nm) in ivs:
             if sa - 0.001 <= t < sb + 0.001:
@@ -354,14 +372,43 @@ def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
         return "empty"
 
     frames = []
-    n = max(1, int(round(s.duration * FPS_CONTACT)))
+    n = max(1, int(round(dur * FPS_CONTACT)))
     for k in range(n + 1):
         t = round(k / FPS_CONTACT, 2)
-        if t > s.duration + 0.001:
+        if t > dur + 0.001:
             break
         frames.append({"t": t, "foreground": "", "background": "",
                        "left_touching": _obj_at(raw["left"], t),
                        "right_touching": _obj_at(raw["right"], t)})
+    return frames
+
+
+def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
+    """STEP 1A — v49 HAND-OBJECT TRACK, sampled CONTACT_SAMPLES times and reconciled by
+    per-0.1s majority vote (a single pass is too unstable). Each sample expands to 10fps
+    frames; we vote per frame per hand, then build the track + object catalogue from the
+    consensus. Downstream (build_track / analysis / seed / dashboard) is unchanged."""
+    wins = plan_windows(s.duration, CONTACT_WIN)
+    _log(wd, f"P1a hand-object track (v49): {len(wins)} window(s) @ {FPS_CONTACT}fps "
+            f"x{CONTACT_SAMPLES} samples -> consensus")
+    passes = [_contact_pass(gv, system, wd, s.duration, wins) for _ in range(CONTACT_SAMPLES)]
+
+    # per-frame majority vote (all passes share the same 0.1s time grid)
+    m = min(len(p) for p in passes)
+    frames = []
+    for k in range(m):
+        row = {"t": passes[0][k]["t"], "foreground": "", "background": ""}
+        for hand, fld in (("left", "left_touching"), ("right", "right_touching")):
+            cand = [p[k].get(fld, "") for p in passes]
+            keys = [_vkey(x) for x in cand]
+            win = Counter(keys).most_common(1)[0][0]
+            if win == ("N/A",):
+                row[fld] = "empty"
+            else:                                   # show the most-voted, most-detailed name
+                same = [cand[j] for j in range(len(cand)) if keys[j] == win]
+                row[fld] = max(Counter(same).most_common(), key=lambda kv: (kv[1], len(kv[0])))[0]
+        frames.append(row)
+
     s.contact_frames = frames
     s.track = build_track(frames)
     s.contact_intervals = {h: [dict(iv) for iv in s.track[h]] for h in ("left", "right")}
@@ -377,7 +424,7 @@ def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     s.objects = list(names.values())
     nL, nR = len(s.track["left"]), len(s.track["right"])
     _log(wd, f"P1a -> {len(s.objects)} objects, track L={nL} R={nR} intervals "
-            f"({len(frames)} frames @ {FPS_CONTACT}fps synthesized from intervals)")
+            f"({len(frames)} frames @ {FPS_CONTACT}fps, {CONTACT_SAMPLES}-sample consensus)")
 
 
 TRANS_WIN = 3.5           # sliding window length (s)

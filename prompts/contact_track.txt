@@ -1,20 +1,29 @@
-Watch this clip segment from t=<<A>>s to t=<<B>>s (first-person, two-handed manipulation; the TOP-RIGHT clock is the time authority — report seconds with one decimal). The segment is sampled at 10 fps.
+Watch this first-person manipulation clip from t=<<A>>s to t=<<B>>s. A clock is burned into the TOP-RIGHT corner — read every time off that clock, in seconds.
 
-Your ONLY job is OBJECT-CONTACT TRACKING: for EACH hand, state which object it is holding / engaged with over time, as contiguous intervals. "Engaged with" = any working contact — gripping, supporting, pressing, pulling, carrying. Do NOT name the action and do NOT guess the task or any assembly/disassembly direction — report ONLY which object each hand holds. Facts only.
+You are telling a robot what to do. So at every moment, ask yourself: for THIS hand, what is it actually MANIPULATING — what is it actively CONTROLLING right now? Not what is it brushing past, not what sits in the background, not the surface things rest on — what would the robot itself have to grip and command to reproduce this motion?
 
-Apply FOREARM L/R: first-person top-down, forearms enter from the bottom — the forearm entering from the frame's LEFT is the LEFT hand, from the RIGHT is the RIGHT hand. Track each hand separately through the whole segment; re-derive from the pixels and never swap when the hands cross.
+For EACH hand, report that object over time.
 
-Name each object by a stable, specific visible identity — colour + form (e.g. "silver bolt", "blue cap", "clear plastic bag", "small silver nut"). Use the SAME name every time the same physical object appears. A joined unit is ONE object under a combined name (e.g. "bolt-nut unit"); once parts separate, name the piece each hand actually holds. In a fastening (threading/screwing one part onto another) the two hands usually hold DIFFERENT parts — a longer base in one, the smaller turned part in the other — name them distinctly.
+The clip runs at 10 frames per second, so read it in 0.1-second steps. At each step, name what each hand holds — then merge the runs of identical steps into intervals. That fine resolution is exactly how you catch a quick separation, a brief empty hand between one piece and the next, or a fast re-grab — yet none of those should shatter a steady, continuous hold.
 
-Rules:
-- "interacting_with" = the object name, or "empty" when the hand holds nothing, or "out of frame" when the forearm is not visible.
-- A NEW interval starts ONLY when the engaged object changes: the hand grips something new, releases it, a hand-to-hand transfer happens, or the held unit's identity changes. Read each change's time off the clock.
-- A real RELEASE — the hand sets its object down (the object stays, the hand opens) or hands it to the other hand — becomes "empty" at that instant and stays "empty" until the hand grips something again. Capture set-down and hand-off moments even if brief; a fresh grab from a pile is "empty" during the reach, then the new object once gripped (even if it looks identical to the last one).
-- Releasing something onto/into a container does NOT make the hand engaged with the container — after a release the hand is "empty".
-- It is completely normal for a hand to be "empty" for long stretches (e.g. while the OTHER hand works, or after setting a finished unit down).
-- RED FLAG: a hand reported holding the SAME object for the ENTIRE segment with no "empty" interval is almost always wrong — re-check whether it ever sets the object down, releases, or hands it off, and report that "empty" interval.
-- Intervals per hand must be CONTIGUOUS from <<A>>s to <<B>>s: each interval's start equals the previous interval's end, covering the whole segment with no gaps or overlaps.
+Now think about continuity. When a hand finishes with one part and immediately reaches for the next, has the thing it is manipulating truly changed — or is this one continuous job? It is continuous. So why would you chop it into pieces, or drop in an "N/A" for the split-second between letting go and grabbing again? You wouldn't. While a hand keeps working the same kind of part, isn't that just ONE interval? A working hand stays busy almost the entire clip — does it really fall empty every second? No.
 
-Raw JSON only:
-{"left": [{"start_sec": <number>, "end_sec": <number>, "interacting_with": "<object name | empty | out of frame>"}],
- "right": [{"start_sec": <number>, "end_sec": <number>, "interacting_with": "<object name | empty | out of frame>"}]}
+When, then, should the answer ever be N/A? Ask one thing: is the hand holding nothing at all? If it still holds something — even while resting, even while perfectly still — is that empty? No. So that is NOT N/A. N/A is rare; it means a genuinely empty hand.
+
+So when do you start a NEW interval? Ask: is the hand still controlling the same object it held a moment ago? If yes, keep the interval going. If it has let go, or dropped what it held and now grips nothing, the answer has changed — so begin a new interval (and if the hand is now empty, that interval is N/A).
+
+And here is the trap. If a hand places OBJECT A into OBJECT B — a part into a container, a piece into a holder — which one is the hand truly controlling? It is moving and commanding A. Can the robot "control" B, the thing A is merely dropped into? No — B is only the destination, where things end up. So the answer is A. Never the container, never the place things are gathered, never the surface underneath. The container's own name is NEVER a valid answer: at any moment a hand's answer is only ever a real part, or N/A — nothing else. If a hand seems to rest on the container while reaching among the parts, decide between the part it is actually taking and N/A.
+
+But do not over-read that. The instant a hand actually grips, arranges, or works the parts — even with the container right there, even if its other fingers also steady that container — is it manipulating a part? Yes. So name the part, not the container. And if BOTH hands are working the parts at once, then BOTH hands have a part — say so for each. A hand only earns "N/A" when it commands no part at all: hanging back, set aside, or resting genuinely empty. So ask each hand on its own, moment by moment: is it working a real part right now? If yes, that part is the answer. Only if it truly holds nothing is it N/A.
+
+One more distinction, and it matters in any assembly or disassembly. Parts COMBINE and SEPARATE. When several pieces are joined and handled as a single whole, is that one thing or many? Name the one combined unit. The instant they come apart, is the hand still on that whole — or on a single separated piece? Then name the actual piece that hand now holds. A joined unit and its separated pieces are DIFFERENT answers, so switch at the very moment the parts join or split. This holds for whatever the parts are — it is not about one particular kind of object.
+
+Name each object precisely — by the attributes you can actually see (its material or colour and exactly which kind of part it is), never a vague label. Use the same name for the same thing whenever it truly is the same thing — but that is NOT licence to freeze on one label for the whole clip: the instant the object in a hand actually changes (a piece picked up or set down, two pieces joined, a unit separated), the name must change with it. And the combined whole carries a name DISTINCT from the separate pieces it is built from: one loose piece, the other loose piece, and the two joined together are THREE different answers, never interchangeable.
+
+Each hand's intervals must be back-to-back with no gaps: every interval's start_sec equals the previous interval's end_sec, covering t=<<A>>s to t=<<B>>s.
+
+LEFT hand = the forearm entering from the LEFT of the frame. RIGHT hand = the forearm entering from the RIGHT.
+
+Output raw JSON only, in exactly this format:
+{"left":  [{"start_sec": <num>, "end_sec": <num>, "interacting_with": "<part or N/A>"}, ...],
+ "right": [{"start_sec": <num>, "end_sec": <num>, "interacting_with": "<part or N/A>"}, ...]}
