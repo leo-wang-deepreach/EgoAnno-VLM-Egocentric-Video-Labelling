@@ -163,8 +163,22 @@ def _apply_timeline(s: ClipState, segs_raw, prov: str, wd: Path, label: str) -> 
         sg.boundary_provenance = prov
         rebuilt.append(sg)
     s.segments = rebuilt
+    # LOCKED-TRANSITION INVARIANT (one chokepoint): NO model-returned timeline may merge
+    # across a detected place/pickup/throw/handoff. Whatever the verifier/gate/fresh-eye
+    # returned, re-split any segment that now bridges a detected transition — a real action
+    # boundary can never be erased downstream. This is the sharp version of the fresh-eye
+    # %-guard: it protects the exact moments that matter, not a blunt segment-count ratio.
+    _enforce_cuts(s, _locked_transitions(s), wd)
     s.track = derive_track_from_labels(s.segments)
     return True
+
+
+def _locked_transitions(s: ClipState) -> list[float]:
+    """The detected place/pickup/throw/handoff times that NO stage may merge across
+    (the global invariant). One definition, used by label+collapse, the verifier, the
+    gate and fresh-eye, so every stage protects the exact same boundaries."""
+    return sorted({round(float(e["t"]), 2) for e in s.transitions
+                   if e.get("t") is not None and 0.3 < float(e["t"]) < s.duration - 0.3})
 
 
 def _enforce_cuts(s: ClipState, cut_times: list[float], wd: Path):
@@ -190,8 +204,7 @@ def label_and_collapse(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     """STEP 4: watch the clip at 10fps + the reliable dense facts, and lay out the per-hand
     action timeline — cut at EVERY action change, collapse only truly-steady runs. Detected
     transitions are REQUIRED cuts (a transition is never swallowed)."""
-    cut_times = sorted({round(float(e["t"]), 2) for e in s.transitions
-                        if e.get("t") is not None and 0.3 < float(e["t"]) < s.duration - 0.3})
+    cut_times = _locked_transitions(s)
     prompt = _p("label_collapse.txt", B=round(s.duration, 1),
                 DIRECTION=s.direction or "(unknown)", GOAL=s.goal or "(unknown)",
                 INVENTORY=s.objects_line(), CONTACT=_contact_summary(s),
@@ -200,8 +213,9 @@ def label_and_collapse(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
                 BURSTS="\n".join(s.bursts_reduced) or "(none)")
     r = gv.watch(prompt, system, SC.TIMELINE, a=0.0, b=s.duration,
                  fps=FPS_LABEL, max_tokens=8000)
+    # _apply_timeline re-enforces the locked transitions itself (the global invariant),
+    # so the collapse can never swallow one — no separate enforce call needed here.
     _apply_timeline(s, r.get("segments"), "collapse", wd, "P4 label+collapse")
-    _enforce_cuts(s, cut_times, wd)                       # GUARANTEE the transition cuts
     _log(wd, f"P4 label+collapse -> {len(s.segments)} segments (transitions enforced)")
 
 
@@ -526,6 +540,7 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
                        TRACK=s.track_lines(),
                        BURSTS="\n".join(s.bursts_reduced) or "(none)",
                        TIMELINE=s.timeline_text(), FLAGGED=flagged,
+                       TRANSITIONS=_transitions_text(s),
                        ANALYSIS=s.analysis_report or ""),
                     frames, system, SC.GATE, model=CLAUDE_GATE)
     s.gate_findings = str(r.get("findings", ""))     # full findings (no truncation)
@@ -631,9 +646,18 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
         rebuilt.append(sg)
     n0 = len(s.segments)
     s.segments = rebuilt
+    # LOCKED-TRANSITION INVARIANT (fix #1): fresh-eye is the LAST stage and historically
+    # the one that collapsed a correct timeline into a 30s blob by merging across real
+    # pickups (~12.7s, ~27.7s). It may relabel and lightly merge, but it may NEVER erase a
+    # detected place/pickup/throw — re-split any transition it swallowed.
+    n_re = len(s.segments)
+    _enforce_cuts(s, _locked_transitions(s), wd)
     s.track = derive_track_from_labels(s.segments)
+    restored = len(s.segments) - n_re
     s.fresh_eye_note = (f"reads_correctly={r.get('reads_correctly')}; {n0} -> "
-                        f"{len(rebuilt)} segs. {str(r.get('notes',''))[:160]}")
+                        f"{len(s.segments)} segs"
+                        + (f" (re-split {restored} swallowed transition(s))" if restored else "")
+                        + f". {str(r.get('notes',''))[:160]}")
     _log(wd, f"P6 fresh-eye: {s.fresh_eye_note}")
 
 
@@ -708,13 +732,27 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
         _HARD = {"idle_but_holding?", "contact_says_idle?", "object_unsupported?"}
         hard = sum(1 for f in s.flags if f.type in _HARD)
         soft = len(s.flags) - hard
-        score = (0 if verdict == "good" else 1, hard, soft, -len(s.segments))
+        # Tiebreaker BOUNDED BY the detected transitions (fix: stop rewarding fragmentation).
+        # The locked transitions imply ~expected segments; prefer the attempt whose count is
+        # CLOSEST to that target, so a 28-seg over-cut can NEVER beat the correct 7-seg one
+        # (the old `-len(segments)` term did exactly the wrong thing). With NO transitions
+        # detected we have no count signal -> fall back to "more is better".
+        locked = _locked_transitions(s)
+        expected = len(locked) + 1
+        seg_term = abs(len(s.segments) - expected) if locked else -len(s.segments)
+        score = (0 if verdict == "good" else 1, hard, soft, seg_term)
         if best is None or score < best[0]:
             best = (score, _copy.deepcopy(s.segments), list(s.flags),
                     _copy.deepcopy(s.track), attempt, list(s.stage_snapshots),
                     s.analysis_report, s.gate_findings, s.purpose_verdict)
-        if verdict == "good" or attempt == max_attempts:
-            _log(wd, f"=== quality={verdict} after attempt {attempt}; "
+        # CAP GRANULARITY: once every detected transition is already covered (count at or past
+        # the transition-implied target + slack), a further needs_rerun can only fragment —
+        # there is nothing real left to split. Stop and keep the best instead of chasing the
+        # gate's complaint into the 7->28 escalation.
+        capped = bool(locked) and attempt >= 2 and len(s.segments) > expected + 2
+        if verdict == "good" or attempt == max_attempts or capped:
+            why = "good" if verdict == "good" else ("granularity-capped" if capped else verdict)
+            _log(wd, f"=== quality={why} after attempt {attempt}; "
                     f"best=attempt {best[4]} (score {best[0]}) -> accept ===")
             break
         feedback = (gate.get("rerun_feedback") or

@@ -6,6 +6,7 @@ Decided direction (from the direction stage; treat as settled unless a flagged s
 Purpose hypothesis: <<GOAL>>
 Possession track (independent ground truth): <<TRACK>>
 Reduced rotation/role/color verdicts (decisive bursts only): <<BURSTS>>
+DETECTED TRANSITIONS (a dense frame scan found these brief place/pickup/throw/handoff events; they are the most reliable boundary signal in the run — every one should line up with a segment boundary, and none should be missing): <<TRANSITIONS>>
 
 FINAL TIMELINE (numbered; each segment is a block — "L:" = LEFT hand, "R:" = RIGHT hand, on their own lines):
 <<TIMELINE>>
@@ -24,7 +25,7 @@ Do NOT re-label segments that are not flagged. For each flagged segment, in cloc
 4. Check the action is not mirrored (ANTI-MIRROR) and the colour is not locked or over-specified (MIXED-IS-TERMINAL; use the colour burst as ground truth).
 5. Check the verb names a single visible action with its endpoint (COMPLETE-THE-ACTION). A label that bundles two actions (e.g. "drop part take new unit") is invalid — replace it with the ONE action its frames actually show; if its frames show two distinct visible actions, do not jam them into one label — instead emit a "split_request" for that segment so an upstream split runs, and leave the existing label.
 6. MISSED ACQUISITION (report only, do not relabel): if a flagged deposit is preceded by manipulation of a NEW object with no acquisition between them, note it in findings so the deterministic gate routes a split — do not invent a pick label.
-7. DETECTED TRANSITION = REAL ACTION (relabel, don't dismiss): a place/pickup/hand-off reported by the dense frame scan (it appears in the analysis block, e.g. "place at 13.6s") is a real action change unless the frames CLEARLY show the grip never opened. Do NOT wave it away as a "momentary regrasp." If a segment spans such a transition but its label says hold/twist/thread, CORRECT it: the acting hand (whose grip opens to place, or closes to pick) gets "place the <object>" / "pick up the <object>"; the other hand becomes N/A. Put the action on the hand that actually changed — never label the placing hand "hold".
+7. DETECTED TRANSITION = REAL ACTION (relabel, don't dismiss): a place/pickup/hand-off reported by the dense frame scan (it appears in the analysis block / DETECTED TRANSITIONS, e.g. "place at 13.6s") is a real action change unless the frames CLEARLY show the grip never opened. Do NOT wave it away as a "momentary regrasp," and do NOT merge across it. If a segment spans such a transition but its label says hold/twist/thread, CORRECT it: the acting hand (whose grip opens to place, or closes to pick) gets "place the <object>" / "pick up the <object>"; the other hand becomes N/A. NAME THE WHOLE OBJECT that leaves/enters the hand: if parts have been joined, it is the assembled UNIT ("place the bolt-nut unit"), NOT a loose sub-part ("place the nut") — a "place the nut" label sitting inside a continuous threading run is the mislabel to FIX (relabel it to the unit), never an excuse to merge the segment away. Put the action on the hand that actually changed — never label the placing hand "hold".
 
 A correction is a FULL replacement label obeying the system-prompt LABEL FORMAT, or exactly "N/A". Only correct labels the frames contradict; never restyle a consistent label.
 
@@ -38,13 +39,20 @@ DIRECTION: report the direction you actually SEE in the frames in "direction" (a
 
 If everything is consistent, return empty corrections and merge lists.
 
-=== OVERALL QUALITY VERDICT — BE A STRICT VERIFIER (drives a bounded re-run) ===
-This trains a robot to REPRODUCE the human's actions, so the timeline must be complete and atomic. You are a STRICT gate: the DEFAULT verdict is "needs_rerun". Set "good" ONLY if you can AFFIRMATIVELY CONFIRM, by watching the frames action by action, that EVERY one of these holds:
-  1. COMPLETE: every distinct action you can see in the frames has its own segment. Walk the clip start to end; for EVERY moment a hand PICKS UP an object, SETS one DOWN/places it, or HANDS one to the other hand, there MUST be a corresponding segment. If any such moment is absorbed into an "ongoing work" segment and is missing from the timeline -> needs_rerun.
-  2. ATOMIC ROLES: in a place/pickup/hand-off segment, the hand that is NOT doing it is labeled N/A (a placing hand places; the other is N/A). If both hands are given active work labels through a visible place/pickup -> needs_rerun.
-  3. NO MERGED ACTIONS: no two clearly-different actions are crammed into one segment (e.g. a screw and a place in one span). NOTE: OVER-segmentation (one continuous action split into several identical-label slivers) is NOT your concern — a delete-only merge critic runs after you and fixes that. Do NOT set needs_rerun just because something looks over-split.
-  4. FRAME-TRUE: every label matches what the frames actually show for that span, and is consistent with the decided direction.
-Judge against the FRAMES, not the timeline's internal tidiness — a timeline can look self-consistent yet be missing real actions. Rerun for MISSING actions, WRONG labels/roles, or merged-distinct-actions — never for harmless over-splitting. When genuinely unsure an action is present, prefer needs_rerun. In "rerun_feedback" name EXACTLY what is missing or wrong, with times — e.g. "a place at ~12.9s and a pickup at ~14s are missing — split them out with the idle hand N/A"; "seg 4 merges a screw and a place — split at ~27.7s". Use "" only when you set "good".
+=== OVERALL QUALITY VERDICT — ACCEPT A CORRECT TIMELINE; RERUN ONLY FOR A REAL DEFECT ===
+This trains a robot to REPRODUCE the human's actions, so the timeline must be complete and atomic — but it must also STOP when it is right. The DETECTED TRANSITIONS above are the expected boundaries: they define how many real place/pickup/throw/handoff events the clip contains. Do NOT demand more cuts than the events justify, and do NOT keep cranking the re-run toward fragmentation.
+
+SET "good" (ACCEPT — this is a real, common outcome, not a rare one) when ALL of these hold:
+  A. COVERAGE: every DETECTED TRANSITION lines up with a segment boundary (±~0.4s), and you can see no place/pickup/throw in the frames that lacks a boundary. The boundaries sitting on the detected transitions IS completeness — if they are all covered, the timeline is complete; do not ask for extra splits.
+  B. ATOMIC ROLES: in each place/pickup/hand-off segment, the acting hand carries the action and the other hand is N/A.
+  C. FRAME-TRUE & CONSISTENT: every label matches the frames for its span, names the object consistently (the assembled UNIT is named as the unit, not a loose sub-part), and is consistent with the decided direction.
+A 6-8 segment timeline of the form thread·place·thread·thread·place·thread, with boundaries on every detected transition and consistent labels, is a CORRECT answer — accept it.
+
+SET "needs_rerun" ONLY for a concrete, nameable DEFECT:
+  1. A MISSING action: a place/pickup/throw you can SEE in the frames that has NO boundary (and is not already in the detected-transition list that the timeline covers).
+  2. A WRONG label/role: a placing hand labeled "hold", both hands active through a place, a swapped L/R, or an object name that contradicts the frames/track.
+  3. A MERGED pair: two clearly-different actions crammed into one span (e.g. a screw and a place together).
+NEVER set needs_rerun for over-splitting (a delete-only merge critic fixes that after you), for a timeline whose boundaries already cover every detected transition, or merely because a long steady action repeats. When every detected transition is covered and you cannot name a specific missing/wrong/merged action, set "good" — do not default to needs_rerun out of caution. In "rerun_feedback" name EXACTLY the one defect with a time (e.g. "a place at ~12.9s is missing — split it with the idle hand N/A"); use "" when you set "good".
 You may also REQUEST a specific check on demand: set "request_merge_critic": true to have the delete-only merge critic re-run, or "request_completeness": true to re-run the pick/place completeness audit, if you suspect over-segmentation or a missing pick/place chain you can't pin down yourself.
 
 Raw JSON only:

@@ -31,5 +31,10 @@ Build one continuous, non-overlapping per-hand timeline covering 0 to <<B>>s.
 - TWO PARTS IN A JOIN: the hands usually hold DIFFERENT parts — one steadies the base, the other turns/threads/places the other part. Name each hand's actual part distinctly.
 - Vague verbs BANNED (manipulate/handle/work/adjust/use). Verbs consistent with the decided direction.
 
+=== AT A PLACE / PICKUP / THROW (each REQUIRED CUT) — ATOMIC, AND NAME THE WHOLE OBJECT ===
+A place/pickup/throw is a ONE-HAND event. In that segment, exactly the hand whose grip changes carries the action; the OTHER hand is "N/A" — it is idle while the one hand sets down / picks up / tosses. Do NOT give both hands active labels through a place or pickup, and do NOT label the placing hand "hold" — its grip is opening, so it is placing.
+- NAME THE OBJECT THAT ACTUALLY LEAVES OR ENTERS THE HAND, not the sub-part being turned. If two parts have been joined (e.g. a nut threaded onto a bolt), the hand sets down or picks up the ASSEMBLED UNIT — label it as the unit ("place the bolt-nut unit" / "pick up the bolt-nut unit"), NEVER "place the nut" while the nut is attached to the bolt (that wording reads as a separate nut placement and is wrong). When instead parts are being SEPARATED, name the piece that actually comes free.
+- UNIT NAME APPEARS AT THE JOIN, NOT BEFORE: use the single-part names while the parts are still separate; switch to the combined "unit" name exactly at and after the place that follows their joining — never let "unit" drift back into the earlier threading/turning segments.
+
 Raw JSON only:
 {"think": "<2-3 sentences: the repeated structure you see and where the boundaries are>", "segments": [{"start_sec": <n>, "end_sec": <n>, "left": "<phrase or N/A>", "right": "<phrase or N/A>"}]}
