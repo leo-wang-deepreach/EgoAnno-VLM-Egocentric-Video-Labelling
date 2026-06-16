@@ -145,10 +145,15 @@ def _apply_timeline(s: ClipState, segs_raw, prov: str, wd: Path, label: str) -> 
     empty/degenerate result (keeps the previous timeline). Returns True if applied."""
     clean = []
     for seg in segs_raw or []:
+        if not isinstance(seg, dict):                  # model sometimes emits a bare string
+            continue                                   # in the segments array -> skip it
         a, b = seg.get("start_sec"), seg.get("end_sec")
         if a is None or b is None:
             continue
-        a, b = float(a), float(b)
+        try:
+            a, b = float(a), float(b)
+        except (TypeError, ValueError):
+            continue
         if b - a < 0.05 or a < -0.1 or b > s.duration + 0.5:
             continue
         clean.append((max(0.0, a), min(s.duration, b),
@@ -620,10 +625,15 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
         return
     clean = []
     for seg in r.get("segments", []):
+        if not isinstance(seg, dict):                  # tolerate a stray non-object entry
+            continue
         a, b = seg.get("start_sec"), seg.get("end_sec")
         if a is None or b is None:
             continue
-        a, b = float(a), float(b)
+        try:
+            a, b = float(a), float(b)
+        except (TypeError, ValueError):
+            continue
         if b - a < 0.05 or a < -0.1 or b > s.duration + 0.5:
             continue
         clean.append((max(0.0, a), min(s.duration, b),
