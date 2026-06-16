@@ -3,8 +3,8 @@ You produce the FULL per-hand action timeline for this clip in ONE pass, for rob
 You watch the WHOLE clip from 0 to <<B>>s at 10 fps (top-right clock = absolute seconds, the time authority). You are also given RELIABLE pre-computed facts — trust them as your primary ground, use the frames to name the visible motion:
 
 Decided direction (settled): <<DIRECTION>>
-Task goal (derived hypothesis): <<GOAL>>
 Object catalogue (use these identities, spelled the same way every time): <<INVENTORY>>
+(No task-goal narrative is given on purpose — you READ each action from the frames + facts below. Do NOT assume a fixed count or structure, e.g. "many X onto one Y"; every cycle may act on a DIFFERENT unit.)
 
 RELIABLE per-hand possession over time (the 1A ground truth — which object each forearm holds, or "empty"; this is your authority for WHO holds WHAT and WHO is idle, per hand — never swap L/R):
 <<CONTACT>>
@@ -12,10 +12,14 @@ RELIABLE per-hand possession over time (the 1A ground truth — which object eac
 DETECTED TRANSITIONS (a dense frame scan — strong evidence of the brief boundary events; honor them):
 <<TRANSITIONS>>
 
-REQUIRED CUTS — you MUST place a segment boundary at EACH of these times (a real place/pickup/throw happens there; it can never be inside a segment): <<REQUIRED_CUTS>>
+REQUIRED CUTS — you MUST place a segment boundary at EACH of these times, and they are HAND-TAGGED «KIND-HAND» (e.g. «PLACE-LEFT» = the LEFT hand places there, «PICKUP-RIGHT» = the RIGHT hand picks up there). A real place/pickup/throw happens at each; it can never be inside a segment: <<REQUIRED_CUTS>>
 
 Decisive rotation/role/colour bursts (reliable for those moments):
 <<BURSTS>>
+
+=== PRIOR-ATTEMPT FEEDBACK (a STRICT verifier reviewed the last attempt — APPLY every item) ===
+This is a punch-list of exactly what was wrong last time. Fix each one in this attempt; do not reproduce the same errors. If it says a hand was frozen "hold" across a place/pickup, put the action on the acting hand and N/A the other; if it says a re-grasp was mislabeled, name the fresh unit ("another <unit>"). If it is "(first attempt …)", there is no prior feedback yet.
+<<FEEDBACK>>
 
 === YOUR JOB: COLLAPSE THE FACTS INTO AN ACTION TIMELINE ===
 Build one continuous, non-overlapping per-hand timeline covering 0 to <<B>>s.
@@ -31,10 +35,12 @@ Build one continuous, non-overlapping per-hand timeline covering 0 to <<B>>s.
 - TWO PARTS IN A JOIN: the hands usually hold DIFFERENT parts — one steadies the base, the other turns/threads/places the other part. Name each hand's actual part distinctly.
 - Vague verbs BANNED (manipulate/handle/work/adjust/use). Verbs consistent with the decided direction.
 
-=== AT A PLACE / PICKUP / THROW (each REQUIRED CUT) — ATOMIC, AND NAME THE WHOLE OBJECT ===
-A place/pickup/throw is a ONE-HAND event. In that segment, exactly the hand whose grip changes carries the action; the OTHER hand is "N/A" — it is idle while the one hand sets down / picks up / tosses. Do NOT give both hands active labels through a place or pickup, and do NOT label the placing hand "hold" — its grip is opening, so it is placing.
-- NAME THE OBJECT THAT ACTUALLY LEAVES OR ENTERS THE HAND, not the sub-part being turned. If two parts have been joined (e.g. a nut threaded onto a bolt), the hand sets down or picks up the ASSEMBLED UNIT — label it as the unit ("place the bolt-nut unit" / "pick up the bolt-nut unit"), NEVER "place the nut" while the nut is attached to the bolt (that wording reads as a separate nut placement and is wrong). When instead parts are being SEPARATED, name the piece that actually comes free.
-- UNIT NAME APPEARS AT THE JOIN, NOT BEFORE: use the single-part names while the parts are still separate; switch to the combined "unit" name exactly at and after the place that follows their joining — never let "unit" drift back into the earlier threading/turning segments.
+=== AT A PLACE / PICKUP / THROW (each REQUIRED CUT) — ATOMIC, HAND FROM THE TAG, NAME THE WHOLE OBJECT ===
+A place/pickup/throw is a ONE-HAND event. The «KIND-HAND» tag tells you WHICH hand acts: on a «PLACE-LEFT»/«PLACE-RIGHT» span the named hand carries "place the <object>"; on a «PICKUP-LEFT»/«PICKUP-RIGHT» span the named hand carries "pick up the <object>". The OTHER hand is "N/A" — idle while the one hand acts. Do NOT give both hands active labels through a transition, and do NOT label the acting hand "hold" — its grip is opening (place) or closing (pickup).
+- ROLES SWAP CYCLE TO CYCLE — DO NOT FREEZE ONE HAND. The hand that places in one cycle may be the hand that picks in the next. Read the tag each time; never carry "hold the bolt" on one hand straight across a place/pickup the OTHER hand performed.
+- NAME THE OBJECT THAT ACTUALLY LEAVES OR ENTERS THE HAND, not the sub-part being turned. If two parts have been joined (e.g. a nut threaded onto a bolt), the hand sets down or picks up the ASSEMBLED UNIT — label it the unit ("place the bolt-nut unit"), NEVER "place the nut" while the nut is on the bolt (that reads as a separate nut placement and is wrong). When parts are being SEPARATED, name the piece that comes free.
+- A PICKUP AFTER A PLACE IS A NEW INSTANCE. When a hand picks up a unit after one was just placed/set aside, it is "pick up another <unit>" (a different unit from a pile/surface), NOT "pick up the nut" and NOT the same unit continued. The task is often work-a-unit → set it down → pick up the NEXT unit → work that one.
+- UNIT NAME APPEARS AT THE JOIN, NOT BEFORE: single-part names while parts are still separate; switch to the combined "unit" name only at/after the place that follows their joining — never let "unit" drift back into the earlier threading segments.
 
 Raw JSON only:
 {"think": "<2-3 sentences: the repeated structure you see and where the boundaries are>", "segments": [{"start_sec": <n>, "end_sec": <n>, "left": "<phrase or N/A>", "right": "<phrase or N/A>"}]}

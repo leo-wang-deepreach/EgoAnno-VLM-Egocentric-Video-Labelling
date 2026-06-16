@@ -186,6 +186,23 @@ def _locked_transitions(s: ClipState) -> list[float]:
                    if e.get("t") is not None and 0.3 < float(e["t"]) < s.duration - 0.3})
 
 
+def _required_cuts_text(s: ClipState) -> str:
+    """Hand-EXPLICIT required-cut hints for the labeler: each detected transition as
+    «KIND-HAND» at its time. The acting hand (the one that places / picks) SWAPS cycle to
+    cycle, so naming it per event stops the labeler freezing one hand's role across the clip
+    and lets it put the action on the right hand with N/A on the other."""
+    out = []
+    for e in s.transitions:
+        t = e.get("t")
+        if t is None or not (0.3 < float(t) < s.duration - 0.3):
+            continue
+        kind = str(e.get("kind", "")).upper()
+        hand = str(e.get("hand", "")).lower()
+        tag = f"«{kind}-{hand.upper()}»" if hand in ("left", "right") else f"«{kind}»"
+        out.append(f"{tag} at {float(t):.1f}s")
+    return ", ".join(out) or "(none)"
+
+
 def _enforce_cuts(s: ClipState, cut_times: list[float], wd: Path):
     """A detected transition may NEVER be swallowed: split any segment that bridges a
     cut time. Structural only (no hardcoded verbs) — the split piece inherits the parent
@@ -205,16 +222,22 @@ def _enforce_cuts(s: ClipState, cut_times: list[float], wd: Path):
         _log(wd, f"P4 enforce: split {changed} swallowed transition(s) at {cut_times}")
 
 
-def label_and_collapse(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
+def label_and_collapse(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
+                       feedback: str = ""):
     """STEP 4: watch the clip at 10fps + the reliable dense facts, and lay out the per-hand
     action timeline — cut at EVERY action change, collapse only truly-steady runs. Detected
-    transitions are REQUIRED cuts (a transition is never swallowed)."""
-    cut_times = _locked_transitions(s)
+    transitions are REQUIRED cuts (a transition is never swallowed). On a rerun, `feedback`
+    is the gate's detailed punch-list from the previous attempt — applied directly here so
+    the labeler fixes the named defects instead of repeating them."""
+    # NOTE: the narrative goal is deliberately NOT passed here — it was poisoning every
+    # span with a false count/structure ("repeatedly thread nuts onto a single bolt"). The
+    # labeler reads the frames + facts; goal stays in the direction/gate stages only.
     prompt = _p("label_collapse.txt", B=round(s.duration, 1),
-                DIRECTION=s.direction or "(unknown)", GOAL=s.goal or "(unknown)",
+                DIRECTION=s.direction or "(unknown)",
                 INVENTORY=s.objects_line(), CONTACT=_contact_summary(s),
                 TRANSITIONS=_transitions_text(s),
-                REQUIRED_CUTS=(", ".join(f"{t:.1f}s" for t in cut_times) or "(none)"),
+                REQUIRED_CUTS=_required_cuts_text(s),
+                FEEDBACK=(feedback.strip() or "(first attempt — no prior feedback yet)"),
                 BURSTS="\n".join(s.bursts_reduced) or "(none)")
     r = gv.watch(prompt, system, SC.TIMELINE, a=0.0, b=s.duration,
                  fps=FPS_LABEL, max_tokens=8000)
@@ -277,36 +300,79 @@ def _seed_timeline(s: ClipState):
 # =========================================================================== #
 #  PHASE 1 — the fact layer                                                    #
 # =========================================================================== #
+_EMPTY_NAMES = {"", "empty", "none", "out of frame", "n/a", "null", "-", "nothing"}
+
+
 def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
-    objs: dict[str, dict] = {}
-    frames: list[dict] = []
+    """STEP 1A — v49 HAND-OBJECT TRACK. Per window, the model returns each hand's
+    contiguous 'what it is holding' intervals at 10fps (no foreground/background, no
+    per-frame guessing — just which object each hand holds). Those STABLE intervals are
+    expanded into the internal 10fps contact frames the rest of the pipeline reads
+    (build_track / analysis / seed / dashboard all keep working), and the object catalogue
+    is derived from the interval names."""
     wins = plan_windows(s.duration, CONTACT_WIN)
-    _log(wd, f"P1a contact_track: {len(wins)} window(s) @ {FPS_CONTACT}fps")
+    _log(wd, f"P1a hand-object track (v49): {len(wins)} window(s) @ {FPS_CONTACT}fps")
 
     def _one(win):
         a, b = win
-        r = gv.watch(_p("contact_track.txt"), system, SC.CONTACT_TRACK,
-                     a=a, b=b, fps=FPS_CONTACT, max_tokens=24000)
-        return r
+        return gv.watch(_p("contact_track.txt", A=round(a, 1), B=round(b, 1)),
+                        system, SC.CONTACT_TRACK, a=a, b=b, fps=FPS_CONTACT, max_tokens=8000)
 
-    with cf.ThreadPoolExecutor(max_workers=min(4, len(wins))) as ex:
-        results = list(ex.map(_one, wins))
-    for r in results:
-        for o in r.get("objects", []):
-            nm = str(o.get("name", "")).strip()
-            if nm and nm.lower() not in {k.lower() for k in objs}:
-                objs[nm] = o
-        for fr in r.get("frames", []):
-            if fr.get("t") is not None:
-                frames.append(fr)
-    frames.sort(key=lambda f: f["t"])
-    s.objects = list(objs.values())
+    results = _parallel(_one, wins, wd=wd, tag="P1a contact_track")
+
+    # collect raw per-hand intervals across all windows (clipped to each window)
+    raw = {"left": [], "right": []}
+    for (a, b), r in zip(wins, results):
+        if not r:
+            continue
+        for hand in ("left", "right"):
+            for iv in r.get(hand, []) or []:
+                try:
+                    sa, sb = float(iv.get("start_sec")), float(iv.get("end_sec"))
+                except (TypeError, ValueError):
+                    continue
+                sa, sb = max(a, sa), min(b, sb)
+                if sb <= sa:
+                    continue
+                raw[hand].append((round(sa, 2), round(sb, 2),
+                                  str(iv.get("interacting_with", "") or "empty").strip()))
+    for hand in ("left", "right"):
+        raw[hand].sort()
+
+    # expand the intervals to 10fps frames so every downstream consumer (build_track,
+    # analysis cross-checks, _seed_timeline, dashboard) keeps working — now the frames are
+    # derived from STABLE intervals instead of independent per-frame guesses
+    def _obj_at(ivs, t):
+        for (sa, sb, nm) in ivs:
+            if sa - 0.001 <= t < sb + 0.001:
+                return nm or "empty"
+        return "empty"
+
+    frames = []
+    n = max(1, int(round(s.duration * FPS_CONTACT)))
+    for k in range(n + 1):
+        t = round(k / FPS_CONTACT, 2)
+        if t > s.duration + 0.001:
+            break
+        frames.append({"t": t, "foreground": "", "background": "",
+                       "left_touching": _obj_at(raw["left"], t),
+                       "right_touching": _obj_at(raw["right"], t)})
     s.contact_frames = frames
     s.track = build_track(frames)
     s.contact_intervals = {h: [dict(iv) for iv in s.track[h]] for h in ("left", "right")}
+
+    # derive the object catalogue from the interval names (no separate inventory stage)
+    names: dict[str, dict] = {}
+    for hand in ("left", "right"):
+        for iv in s.track[hand]:
+            nm = str(iv.get("interacting_with", "")).strip()
+            if nm and nm.lower() not in _EMPTY_NAMES \
+                    and nm.lower() not in {k.lower() for k in names}:
+                names[nm] = {"name": nm}
+    s.objects = list(names.values())
     nL, nR = len(s.track["left"]), len(s.track["right"])
-    _log(wd, f"P1a -> {len(s.objects)} objects, {len(frames)} contact frames, "
-            f"track L={nL} R={nR} intervals")
+    _log(wd, f"P1a -> {len(s.objects)} objects, track L={nL} R={nR} intervals "
+            f"({len(frames)} frames @ {FPS_CONTACT}fps synthesized from intervals)")
 
 
 TRANS_WIN = 3.5           # sliding window length (s)
@@ -379,11 +445,23 @@ def phase2_bursts(s: ClipState, system: str, wd: Path):
     # seed 2-3 direction probes across the clip (where rotation shows). (No cycle stage:
     # it was vestigial/unstable and never drove anything — removed.)
     spans = plan_windows(s.duration, max(4.0, s.duration / 4))   # already (a,b) pairs
-    qdir = ("Watching ONLY the visible rotation/motion of the part being worked, is "
-            "this moment ASSEMBLY (tightening/screwing-on/joining/inserting) or "
-            "DISASSEMBLY (loosening/unscrewing/removing/separating)? Verdict must be "
-            "exactly 'assembly', 'disassembly', or 'cannot determine'.")
-    for (a, b) in spans[:3]:
+    # HIGH ABSTENTION BAR: a nut spinning on a thread looks near-identical assembling vs
+    # disassembling, so a probe must answer a direction ONLY when the direction of change is
+    # unmistakable; otherwise 'cannot determine' (dropped by burst_reduce). This kills the
+    # assembly-default that let one ambiguous burst set a whole clip's (wrong) direction.
+    qdir = ("Watching ONLY the visible rotation/motion of the part being worked: can you tell "
+            "UNMISTAKABLY which way it is going? ASSEMBLY = parts being joined / a fastener "
+            "screwed ON / inserted / engagement INCREASING. DISASSEMBLY = parts being separated "
+            "/ a fastener unscrewed OFF / removed / engagement DECREASING. A fastener turning on "
+            "a thread looks almost the same either way — answer 'assembly' or 'disassembly' ONLY "
+            "if the direction of change is CLEAR in these frames; if you cannot be sure which "
+            "way it is progressing, answer 'cannot determine'. Verdict exactly 'assembly', "
+            "'disassembly', or 'cannot determine'.")
+    # Sample MANY direction probes spread across the WHOLE clip (~one per 6s) — a single burst
+    # must never be able to commit a clip's direction (the assembly-bias fix).
+    n_dir = max(4, int(round(s.duration / 6.0)))
+    dir_spans = plan_windows(s.duration, s.duration / n_dir)
+    for (a, b) in dir_spans:
         reqs.append({"t": round((a + b) / 2, 2), "kind": "direction", "question": qdir})
     # one role probe at the busiest moment
     if spans:
@@ -431,11 +509,19 @@ def phase3_direction(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     # ambiguity when the deterministic burst summary already commits (the doctrine:
     # ambiguity must be COSTLY). Override from the burst majority.
     summ = s.direction_burst_summary or {}
+    decisive = int(summ.get("assembly", 0)) + int(summ.get("disassembly", 0))
+    # Bursts may override an "ambiguous" structural read ONLY with >=2 decisive verdicts.
+    # A lone decisive burst must NOT commit a direction — that single-vote override is exactly
+    # what set assembly on the two clips that were really disassembly. <2 decisive -> leave the
+    # structural verdict (direction_decide already weighs end-state inventory) as-is.
     if s.direction in ("other_or_ambiguous", "") and summ.get("rule") == "single_direction_majority" \
-            and summ.get("majority") in ("assembly", "disassembly"):
-        _log(wd, f"P3 direction was '{s.direction}' but bursts commit "
-                f"{summ['majority']} (single-direction) -> override")
+            and summ.get("majority") in ("assembly", "disassembly") and decisive >= 2:
+        _log(wd, f"P3 direction was '{s.direction}' but {decisive} decisive bursts commit "
+                f"{summ['majority']} -> override")
         s.direction = summ["majority"]
+    elif s.direction in ("other_or_ambiguous", "") and decisive < 2:
+        _log(wd, f"P3 direction ambiguous and only {decisive} decisive burst(s) -> "
+                f"NOT overriding from bursts (structure/end-state decides)")
     _log(wd, f"P3 direction={s.direction} switch={s.phase_switch_sec} | goal: {s.goal}")
 
 
@@ -592,6 +678,19 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
                 break
     # split_request dropped: in the one-timeline model the gate edits DIRECTLY (relabel +
     # merge); a needed split is the labeler/collapse's job, not an orphan flag nobody reads.
+    # DETERMINISTIC BACKSTOP: the gate must not be able to rubber-stamp a code-detected
+    # STRUCTURAL contradiction. frozen_across_transition?/dup_across_transition? are grounded
+    # in the reliable P1c transitions (not the flaky 1A contact), so if any survive, FORCE
+    # needs_rerun regardless of the model's verdict — a hand cannot hold the same thing across
+    # its own place/pickup, and identical labels cannot straddle a real transition.
+    _STRUCT = {"frozen_across_transition?", "dup_across_transition?"}
+    struct = [f for f in s.flags if f.type in _STRUCT]
+    if struct and r.get("quality_verdict") == "good":
+        names = "; ".join(f.detail for f in struct[:3])
+        _log(wd, f"P5 gate said good but {len(struct)} structural flag(s) -> FORCE needs_rerun")
+        r["quality_verdict"] = "needs_rerun"
+        r["rerun_feedback"] = (f"Structural contradiction(s) [code-detected, reliable]: {names}. "
+                               + str(r.get("rerun_feedback", "")))
     _log(wd, f"P5 gate: purpose={s.purpose_verdict}, {nc} corrections, {nm} seam-merges, "
             f"quality={r.get('quality_verdict')}")
     # on-demand: the gate may invoke either critic specifically (each guarded to once)
@@ -722,7 +821,10 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
         if attempt > 1 and feedback:
             phase1_transitions(s, system, wd, hint=feedback)   # focused re-scan
         s.flags, s.ran, s.stage_snapshots = [], set(), list(facts_snaps)
-        label_and_collapse(s, gv, system, wd)         # STEP 4: collapse facts -> sentences
+        # the gate's detailed punch-list flows straight into the labeler on a rerun, so the
+        # next attempt FIXES the named defects rather than regenerating the same labels
+        label_and_collapse(s, gv, system, wd,
+                           feedback=feedback if attempt > 1 else "")  # STEP 4
         _snap(s, "4 label + collapse", wd)
         refine_timeline(s, system, wd)                # STEP 5: verifier (model edit)
         _snap(s, "5 verifier (consistency edit)", wd)
@@ -739,7 +841,8 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
         # then fewest soft flags, then MORE segments. The hard term ranks the attempt most
         # consistent with the contact facts ABOVE a raw flag-count (which misranked the
         # thread/N-A timeline above the correct thread/pickup one on e333dda6).
-        _HARD = {"idle_but_holding?", "contact_says_idle?", "object_unsupported?"}
+        _HARD = {"idle_but_holding?", "contact_says_idle?", "object_unsupported?",
+                 "frozen_across_transition?", "dup_across_transition?"}
         hard = sum(1 for f in s.flags if f.type in _HARD)
         soft = len(s.flags) - hard
         # Tiebreaker BOUNDED BY the detected transitions (fix: stop rewarding fragmentation).
@@ -772,7 +875,21 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
      s.analysis_report, s.gate_findings, s.purpose_verdict) = best[1:]
 
     # ---- STEP 8: fresh-eye final review (context-free), once on the best ----
+    # fresh-eye runs AFTER the gate, so its output is never re-graded. Guard it: if it
+    # INTRODUCES a structural defect (an identical-label pair straddling a transition, or a
+    # hand frozen across its own transition — the exact failures the strict gate rejects),
+    # revert to the vetted pre-fresh-eye timeline. Fresh-eye may improve, never regress.
+    _STRUCT8 = {"frozen_across_transition?", "dup_across_transition?"}
+    _pre_segs = _copy.deepcopy(s.segments)
+    _pre_track = _copy.deepcopy(s.track)
+    _pre_bad = sum(1 for f in AN.analyze(s)[1] if f.type in _STRUCT8)
     fresh_eye(s, system, wd)
+    _post_bad = sum(1 for f in AN.analyze(s)[1] if f.type in _STRUCT8)
+    if _post_bad > _pre_bad:
+        _log(wd, f"P6 fresh-eye introduced {_post_bad - _pre_bad} structural defect(s) "
+                f"({_pre_bad}->{_post_bad}) -> REVERT to pre-fresh-eye timeline")
+        s.segments, s.track = _pre_segs, _pre_track
+        s.fresh_eye_note = (s.fresh_eye_note + " | REVERTED (introduced structural defect)").strip()
     _snap(s, "8 fresh-eye (final, exported)", wd)
 
     episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)

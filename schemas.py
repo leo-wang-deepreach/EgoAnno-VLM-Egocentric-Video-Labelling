@@ -17,28 +17,19 @@ _NEED_BURST = {"type": "ARRAY", "items": {
     "properties": {"t": {"type": "NUMBER"}, "question": {"type": "STRING"}},
     "required": ["t", "question"]}}
 
-# Phase 1a — object + hand-contact track (10fps, THE GROUND TRUTH)
+# Phase 1a — hand-object contact track (v49 template: per-hand "what each hand holds"
+# as contiguous intervals, 10fps). No foreground/background, no separate catalogue — the
+# object names ARE the interacting_with values; the pipeline derives the catalogue from them.
+_TRACK_IVS = {"type": "ARRAY", "items": {
+    "type": "OBJECT",
+    "properties": {"start_sec": {"type": "NUMBER"},
+                   "end_sec": {"type": "NUMBER"},
+                   "interacting_with": {"type": "STRING"}},
+    "required": ["start_sec", "end_sec", "interacting_with"]}}
 CONTACT_TRACK = {
     "type": "OBJECT",
-    "properties": {
-        "objects": {"type": "ARRAY", "items": {
-            "type": "OBJECT",
-            "properties": {"name": {"type": "STRING"},
-                           "colour": {"type": "STRING"},
-                           "function": {"type": "STRING"}},
-            "required": ["name"]}},
-        "frames": {"type": "ARRAY", "items": {
-            "type": "OBJECT",
-            "properties": {
-                "t": {"type": "NUMBER"},
-                "foreground": {"type": "STRING"},
-                "background": {"type": "STRING"},
-                "left_touching": {"type": "STRING"},
-                "right_touching": {"type": "STRING"}},
-            "required": ["t", "foreground", "background",
-                         "left_touching", "right_touching"]}},
-    },
-    "required": ["objects", "frames"],
+    "properties": {"left": _TRACK_IVS, "right": _TRACK_IVS},
+    "required": ["left", "right"],
 }
 
 # Phase 4 — seg_reconcile (v49): per-stretch "one action or several?" -> split cuts

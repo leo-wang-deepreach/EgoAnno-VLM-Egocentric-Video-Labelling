@@ -26,10 +26,10 @@ GEMINI_BASE = "https://generativelanguage.googleapis.com"
 OPENAI_URL = "https://api.openai.com/v1/chat/completions"
 
 # model ids (facts-first defaults)
-GEMINI_NATIVE = "gemini-3.1-pro-preview"          # native video, structure/facts
-GEMINI_BURST = "gemini-3.5-flash"                 # cheap 30fps micro-bursts
-GPT_MODEL = "gpt-5.5"                             # labeler + template-match
-CLAUDE_GATE = "claude-opus-4-8"                   # the only Claude stage
+GEMINI_NATIVE = "gemini-3.1-pro-preview"          # native video — EVERY Gemini call uses this
+GPT_MODEL = "gpt-5.5"                             # (unused: no GPT stage in facts-first)
+CLAUDE_GATE = "claude-opus-4-8"                   # the only Claude stage (gate/verifier/bursts)
+# NOTE: gemini-flash is intentionally absent — facts-first uses pro-preview + opus only.
 
 
 def read_key(name: str) -> str:
@@ -175,7 +175,7 @@ class GeminiFrames:
     Gemini are thinking models: keep a high max_tokens or content comes back empty."""
     BASE = "https://generativelanguage.googleapis.com/v1beta/openai"
 
-    def __init__(self, model: str = GEMINI_BURST):
+    def __init__(self, model: str = GEMINI_NATIVE):
         self.key = read_key(".gemini_key")
         self.model = model
 

@@ -198,6 +198,47 @@ def analyze(s: ClipState) -> tuple[str, list[Flag]]:
                          f"for ~the entire clip with no release — the contact track may "
                          f"be unreliable for this hand; trust the frames.")
 
+    # 9. HARD: a hand frozen across its OWN detected transition (inertia "hold") --------
+    # A place/pickup IS that hand changing what it does, so the acting hand must NOT carry the
+    # SAME label on both sides of its own transition. This is the "hold the bolt" stamped on a
+    # placing hand — a labeling error the delete-only merger cannot fix (the boundary is real).
+    def _seg_edge(t, side):
+        best = None
+        for j, sg in enumerate(segs):
+            edge = sg.end if side == "before" else sg.start
+            if abs(edge - t) <= 0.4:
+                best = j
+        return best
+    for e in s.transitions:
+        t = e.get("t")
+        hand = str(e.get("hand", "")).lower()
+        if t is None or hand not in ("left", "right"):
+            continue
+        t = float(t)
+        bi, ai = _seg_edge(t, "before"), _seg_edge(t, "after")
+        if bi is None or ai is None or bi == ai:
+            continue
+        lb = str(getattr(segs[bi], hand) or "n/a").strip().lower()
+        la = str(getattr(segs[ai], hand) or "n/a").strip().lower()
+        if lb == la and lb not in ("n/a", ""):
+            flags.append(Flag(ai, "frozen_across_transition?", "analysis",
+                              f"{hand} keeps identical label '{getattr(segs[ai], hand)}' across "
+                              f"its detected {e.get('kind','?')} at {t:.1f}s — the acting hand "
+                              f"cannot hold the same thing through its own place/pickup"))
+
+    # 10. HARD: adjacent IDENTICAL-label segments straddling a detected transition -------
+    # The merger (correctly) refuses to merge across a real transition, so identical labels on
+    # both sides are a labeling failure: each side must be relabeled by its own action.
+    trans_t = [float(e["t"]) for e in s.transitions if e.get("t") is not None]
+    for i in range(len(segs) - 1):
+        if _pair(segs[i]) == _pair(segs[i + 1]):
+            b = round(segs[i].end, 2)
+            if any(abs(b - tt) <= 0.4 for tt in trans_t):
+                flags.append(Flag(i + 1, "dup_across_transition?", "analysis",
+                                  f"#{i+1} and #{i+2} carry IDENTICAL labels but a detected "
+                                  f"transition sits between them at {b:.1f}s — relabel each side "
+                                  f"by its own action (place vs pickup vs work)"))
+
     header = ("=== CODE-GENERATED ANALYSIS (advisory only) ===\n"
               "Deterministic counts computed by code — NOT a model opinion, NOT ground "
               "truth. They can be wrong at edges (a clip starting/ending mid-cycle "

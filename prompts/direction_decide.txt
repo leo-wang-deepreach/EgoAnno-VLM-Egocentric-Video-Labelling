@@ -11,15 +11,16 @@ Burst direction summary (counts and whether decisive verdicts form contiguous ru
 
 1. STRUCTURE FIRST. Read the cycle template and the possession track together. If the track shows the SAME contiguous cycle repeating with one stable engage->work->deposit shape throughout (one stable period), this is ONE operation with ONE direction — not alternating. Regularity in the track is strong evidence AGAINST mixed_or_alternating. State the track's period and shape.
 
-2. EXEMPLAR STATE CHANGE. Track one exemplar object through a full cycle: does it start as separate parts and end joined (ASSEMBLY), start joined and end separated into different destinations (DISASSEMBLY / SORTING), or move/portion material without joining or separating part classes (TRANSFER_OR_PORTIONING)? End-state accumulation overrides any narrative impression of "tightening" vs "loosening".
+2. EXEMPLAR STATE CHANGE — THIS IS YOUR PRIMARY SIGNAL. Compare the FIRST-frame scene to the LAST-frame scene and track one exemplar object through a full cycle: does it start as separate parts and end joined (ASSEMBLY), start joined and end separated into different destinations (DISASSEMBLY / SORTING), or move/portion material without joining or separating part classes (TRANSFER_OR_PORTIONING)? What ACCUMULATES by the end decides it — a growing pile of finished JOINED units = assembly; a growing pile of SEPARATED loose parts = disassembly. This end-state accumulation OUTRANKS any rotation read and any narrative impression of "tightening" vs "loosening": a fastener turning on a thread looks the same both ways, so do NOT decide from rotation when the end-state is visible.
 
 3. PRE-EXISTING PILE GUARD. A pile already present in the first frame proves nothing about direction. Derive direction from the exemplar's state change, never from a t=0 pile. Both directions must be considered symmetrically.
 
-4. ROTATION BURSTS BREAK TIES ONLY. Use the burst summary:
-   - If a majority is clear and runs == 1 (or any opposite run is an isolated size-1 dissenter): direction = the majority. A lone dissenting burst NEVER creates "mixed".
+4. ROTATION BURSTS BREAK TIES ONLY — AND ONLY WITH >=2 DECISIVE VERDICTS. Use the burst summary:
+   - A direction needs at least TWO decisive bursts agreeing. A SINGLE decisive burst does NOT commit anything — treat it as no rotation evidence and decide from structure (steps 1-2). (The bursts abstain ("cannot determine") whenever the thread direction is unclear, so a 1/0 tally means the evidence is too thin, not that the answer is that direction.)
+   - With >=2 decisive verdicts and a clear majority (runs == 1, or any opposite run is an isolated size-1 dissenter): bursts may confirm the structural read; if they CONFLICT with a clearly-visible end-state, the END-STATE (step 2) wins. A lone dissenting burst NEVER creates "mixed".
    - mixed_or_alternating is correct ONLY when decisive verdicts form CONTIGUOUS OPPOSITE RUNS each of size >= 2 (a real block of one direction, then a real block of the other). If so, report the switch time(s).
-   - If no decisive rotation exists, decide from structure (steps 1-2) alone.
-   A single threading burst NEVER outranks a regular repeating cycle. Rotation tells you which way a thread turns at one instant; structure tells you what the whole task is doing.
+   - If no decisive rotation exists (or only one), decide from structure (steps 1-2) alone.
+   A single threading burst NEVER outranks a regular repeating cycle or a visible end-state. Rotation tells you which way a thread turns at one instant; structure tells you what the whole task is doing.
 
 5. PHASE SWITCH. Only if BOTH structure (the source->output flow visibly reverses mid-clip) AND the burst runs (size >= 2 each) agree on a switch, report phase_switch_sec. Never declare a switch from bursts alone or from one anomalous span.
 

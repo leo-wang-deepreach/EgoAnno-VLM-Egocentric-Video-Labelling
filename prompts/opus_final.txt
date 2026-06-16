@@ -39,20 +39,22 @@ DIRECTION: report the direction you actually SEE in the frames in "direction" (a
 
 If everything is consistent, return empty corrections and merge lists.
 
-=== OVERALL QUALITY VERDICT — ACCEPT A CORRECT TIMELINE; RERUN ONLY FOR A REAL DEFECT ===
-This trains a robot to REPRODUCE the human's actions, so the timeline must be complete and atomic — but it must also STOP when it is right. The DETECTED TRANSITIONS above are the expected boundaries: they define how many real place/pickup/throw/handoff events the clip contains. Do NOT demand more cuts than the events justify, and do NOT keep cranking the re-run toward fragmentation.
+=== OVERALL QUALITY VERDICT — STRICT GATE: PROVE IT IS RIGHT, OR RERUN ===
+This trains a robot to REPRODUCE the human's actions. The DEFAULT verdict is "needs_rerun". Set "good" ONLY after you have WALKED THE CLIP action by action against the frames and AFFIRMATIVELY confirmed EVERY check below. If you cannot confirm even one, or you are unsure, set "needs_rerun". A passing timeline is achievable and not rare — but it must EARN the pass; do not grant it out of politeness, fatigue, or because the timeline merely looks internally tidy.
 
-SET "good" (ACCEPT — this is a real, common outcome, not a rare one) when ALL of these hold:
-  A. COVERAGE: every DETECTED TRANSITION lines up with a segment boundary (±~0.4s), and you can see no place/pickup/throw in the frames that lacks a boundary. The boundaries sitting on the detected transitions IS completeness — if they are all covered, the timeline is complete; do not ask for extra splits.
-  B. ATOMIC ROLES: in each place/pickup/hand-off segment, the acting hand carries the action and the other hand is N/A.
-  C. FRAME-TRUE & CONSISTENT: every label matches the frames for its span, names the object consistently (the assembled UNIT is named as the unit, not a loose sub-part), and is consistent with the decided direction.
-A 6-8 segment timeline of the form thread·place·thread·thread·place·thread, with boundaries on every detected transition and consistent labels, is a CORRECT answer — accept it.
+PASS REQUIRES ALL OF (verify each against the frames, not against the timeline's own neatness):
+  A. COVERAGE: every DETECTED TRANSITION lines up with a segment boundary (±~0.4s), AND no place/pickup/throw you can SEE in the frames lacks a boundary.
+  B. ATOMIC TRANSITION SPANS: in EACH place/pickup/throw span, exactly the ACTING hand carries the action and the OTHER hand is N/A. Both hands active through a transition = FAIL.
+  C. NO FROZEN ROLE: no hand carries the SAME label straight across a detected transition. A hand labeled "hold the <X>" on both sides of a place/pickup that <X> went through is the inertia-hold error = FAIL. Roles may swap cycle to cycle; a hand frozen on one label across the whole clip while transitions happen = FAIL.
+  D. NO IDENTICAL NEIGHBORS ACROSS A TRANSITION: two adjacent segments with IDENTICAL left+right labels that have a detected transition between them = FAIL (relabel each side by its own action — this is a label error the merger cannot fix, NOT a merge candidate).
+  E. FRAME-TRUE OBJECT IDENTITY: every label matches the frames; the object that leaves/enters a hand is named as what it IS (the assembled UNIT, or "another <unit>" for a fresh one from a pile — never a loose sub-part like "the nut" when it is on the bolt). A re-grasp mislabeled "pick up the nut" = FAIL.
+  F. DIRECTION MATCHES END-STATE: the labels' direction agrees with what the frames show ACCUMULATING by the end (more joined units = assembly; more separated loose parts = disassembly). If the timeline says assembly but the end-state shows parts being SEPARATED (or vice-versa), the direction is wrong = FAIL (report the corrected direction in "direction").
 
-SET "needs_rerun" ONLY for a concrete, nameable DEFECT:
-  1. A MISSING action: a place/pickup/throw you can SEE in the frames that has NO boundary (and is not already in the detected-transition list that the timeline covers).
-  2. A WRONG label/role: a placing hand labeled "hold", both hands active through a place, a swapped L/R, or an object name that contradicts the frames/track.
-  3. A MERGED pair: two clearly-different actions crammed into one span (e.g. a screw and a place together).
-NEVER set needs_rerun for over-splitting (a delete-only merge critic fixes that after you), for a timeline whose boundaries already cover every detected transition, or merely because a long steady action repeats. When every detected transition is covered and you cannot name a specific missing/wrong/merged action, set "good" — do not default to needs_rerun out of caution. In "rerun_feedback" name EXACTLY the one defect with a time (e.g. "a place at ~12.9s is missing — split it with the idle hand N/A"); use "" when you set "good".
+DO NOT FAIL FOR: pure over-splitting (one continuous action chopped into several identical-label slivers with NO transition between them — a delete-only merge critic fixes that after you). Over-segmentation alone is not a rerun reason; A–F are.
+
+The CODE-GENERATED ANALYSIS above may flag "frozen_across_transition?" or "dup_across_transition?" — those map directly to checks C and D. Confirm each against the frames; if real, it is an automatic FAIL.
+
+In "rerun_feedback" give the NEXT attempt a DETAILED, ACTIONABLE PUNCH-LIST — one line per defect, each naming the segment number AND time, which check (A–F) it violates, and the EXACT fix (which hand gets which label, or where to split). List EVERY defect you found, not just one; be specific enough that the next labeler can apply each item verbatim. Example: "#3 (~12.8s) check C: LEFT is 'hold the silver bolt' across the place — set LEFT='place the bolt-nut unit', RIGHT=N/A. #4 (~14s) check E: RIGHT 'pick up the nut' is a fresh unit from the pile — set RIGHT='pick up another bolt-nut unit', LEFT=N/A. #6/#7 check D: identical labels across the pickup at 28.8s — relabel #7 RIGHT='pick up another bolt-nut unit'. Direction OK." Use "" only when you set "good".
 You may also REQUEST a specific check on demand: set "request_merge_critic": true to have the delete-only merge critic re-run, or "request_completeness": true to re-run the pick/place completeness audit, if you suspect over-segmentation or a missing pick/place chain you can't pin down yourself.
 
 Raw JSON only:
