@@ -905,7 +905,7 @@ def _global_audit_gpt(s, system: str, wd: Path):
     _log(wd, f"W global-audit (gpt): {n0} -> {len(rebuilt)} segments | {str(r.get('notes',''))[:90]}")
 
 
-def _annotate(video, out_path, workdir=None, max_attempts=2):
+def _annotate(video, out_path, workdir=None, max_attempts=1):
     """The pipeline for one clip — circle-grounded, no modes. The segment->verify block runs
     in a keep-best rerun loop (<=max_attempts); the verifier's feedback decides re-entry
     (relabel by default; full re-segment on a direction flip). Stages:
@@ -943,7 +943,8 @@ def _annotate(video, out_path, workdir=None, max_attempts=2):
         s.flags, s.ran, s.stage_snapshots, s.transitions = [], set(), list(facts_snaps), []
         if attempt == 1 or stage == "segment":
             _lean_segment(s, gv, system, wd); _snap(s, "S segment", wd)            # STAGE S
-            _seg_reconcile(s, gv, system, wd); _snap(s, "S+ seg-reconcile", wd)    # STAGE S+ (split)
+            # NOTE: seg_reconcile (S+) disabled — on dense footage it over-split (18->53),
+            # 5x'ing label calls + over-segmenting. Base segmenter + S2 merge-critic balance it.
         _lean_label(s, gv, system, wd, feedback=feedback if attempt > 1 else "")   # STAGE A
         _snap(s, "A label", wd)
         _atomic_contract(s, wd); _snap(s, "R atomic-contract", wd)                 # STAGE R
@@ -1005,7 +1006,7 @@ def _hand_overlay(video: str, workdir: str | None) -> str:
 
 
 def annotate(video: str, out_path: str, workdir: str | None = None,
-             max_attempts: int = 2) -> dict:
+             max_attempts: int = 1) -> dict:
     """Public entry — ONE pipeline, no modes/flags:
       raw video -> YOLO L/R-circle overlay -> clock burn -> bursts + direction
       -> [ S segment -> S+ seg-reconcile -> A label -> R atomic-contract -> S2 merge-critic
