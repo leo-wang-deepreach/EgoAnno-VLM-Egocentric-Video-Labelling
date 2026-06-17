@@ -252,6 +252,16 @@ def build_track(contact_frames: list[dict], min_dur: float = 0.25,
             clean.append({"start_sec": round(iv["start_sec"], 2),
                           "end_sec": round(iv["end_sec"], 2),
                           "interacting_with": name})
+        # close sub-frame holes left by frame-sampling: object A's last frame at t and B's
+        # first at t+0.1 leave a ~0.1s gap that otherwise surfaces as a spurious "N/A" sliver.
+        # Snap any small gap (<=0.3s, incl. min_dur-dropped blips) to its midpoint so the
+        # per-hand timeline is contiguous. Larger gaps (a genuinely empty hand) are left.
+        for i in range(1, len(clean)):
+            gap = clean[i]["start_sec"] - clean[i - 1]["end_sec"]
+            if 0 < gap <= 0.3:
+                mid = round((clean[i - 1]["end_sec"] + clean[i]["start_sec"]) / 2, 2)
+                clean[i - 1]["end_sec"] = mid
+                clean[i]["start_sec"] = mid
         track[hand] = clean
     return track
 

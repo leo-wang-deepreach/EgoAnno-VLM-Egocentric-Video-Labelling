@@ -22,7 +22,10 @@ Retired (v49 top-down path) lives under unused/.
 from __future__ import annotations
 
 import concurrent.futures as cf
+import json
+import math
 import re
+import subprocess
 import time
 from collections import Counter
 from pathlib import Path
@@ -42,7 +45,9 @@ PROMPTS = HERE / "prompts"
 
 # frame budgets (facts-first; refine-heavy then label-heavy)
 FPS_CONTACT = 10.0
-CONTACT_SAMPLES = 3       # sample the 1A contact track N times + reconcile (cancels single-pass variance)
+CHUNK_SEC = 300.0         # long videos are split into even parts of <= this many seconds, each
+                          # annotated independently then merged on a global timeline (hard edge
+                          # at each seam). Keeps every per-stage frame count under Gemini's cap.
 FPS_TRANSITION = 10.0     # dense whole-clip read to catch brief place/pickup/handoff
 FPS_DIRECTION = 10.0      # user override: dense whole-clip read for direction
 FPS_SEGMENT = 10.0        # v49 segmentation, dense so brief pick/place are visible
@@ -302,6 +307,25 @@ def _seed_timeline(s: ClipState):
                      left=_obj_at("left", mid), right=_obj_at("right", mid))
         sg.boundary_provenance = "1a_seed"
         segs.append(sg)
+
+    # NO N/A: a hand is treated as continuously holding — carry the last real object across
+    # any residual N/A span (forward, then backward to cover a leading N/A). Only a hand that
+    # is N/A for the ENTIRE clip stays N/A.
+    for attr in ("left", "right"):
+        last = None
+        for sg in segs:
+            v = (getattr(sg, attr) or "").strip()
+            if v and v.upper() != "N/A":
+                last = v
+            elif last:
+                setattr(sg, attr, last)
+        nxt = None
+        for sg in reversed(segs):
+            v = (getattr(sg, attr) or "").strip()
+            if v and v.upper() != "N/A":
+                nxt = v
+            elif nxt and (not v or v.upper() == "N/A"):
+                setattr(sg, attr, nxt)
     s.segments = segs
 
 
@@ -311,42 +335,48 @@ def _seed_timeline(s: ClipState):
 _EMPTY_NAMES = {"", "empty", "none", "out of frame", "n/a", "null", "-", "nothing"}
 
 
-# --- Stage-1A sample-and-reconcile -------------------------------------------- #
-# A single VLM pass over this fine-grained contact task is unstable run-to-run, so the
-# contact track is sampled CONTACT_SAMPLES times and reconciled by per-0.1s majority vote.
-_V_STOP = {"and", "the", "a", "an", "of", "with", "plus", "to", "into", "its", "on", "in", "or"}
-_V_FILLER = {"assembly", "assembled", "unit", "combined", "joined", "set", "piece", "pieces",
-             "two", "both", "together", "group", "bunch", "handful", "whole", "thing", "object"}
-_V_DESC = {"silver", "metal", "metallic", "steel", "grey", "gray", "shiny", "small", "large",
-           "clear", "single", "loose", "one", "another", "tiny", "little"}
+# --- Stage-1A two-pass self-review ------------------------------------------- #
+# A single pass is unstable, so each window is tracked TWICE: a draft viewing (the model may
+# leave itself notes about uncertainties), then a final viewing where it re-watches with its
+# draft + notes + the prompt's CHECKLIST and corrects it — above all fixing left/right N/A
+# placement. 1A gets NO separate system prompt; everything it needs is in contact_track.txt.
+_DRAFT_SUFFIX = ("\n\n[FIRST VIEWING] Give your best track now. Use the \"notes\" field to "
+                 "record anything you are unsure about — which hand holds what, an object's "
+                 "identity, or a boundary time — to resolve on a second viewing.")
+_FINAL_SUFFIX = ("\n\n[FINAL VIEWING — your last look; make it correct] Your first-pass "
+                 "draft:\n{draft}{notes}\nRe-watch the window and run the CHECKLIST on your "
+                 "draft. Fix every problem; above all, re-find each forearm from the side it "
+                 "enters and confirm each object is on the CORRECT hand, with NO empty/N/A "
+                 "interval. Output the corrected final track.")
 
 
-def _vkey(name: str):
-    """Grouping key for voting: empties -> ('N/A',); otherwise the sorted set of core nouns
-    (articles/fillers/generic descriptors dropped, singularised). So 'silver bolt' == 'bolt'
-    == 'bolts', but 'bolt and nut' stays DISTINCT from 'bolt'. A parsing aid, not judgement."""
-    n = (name or "").strip().lower()
-    if n in _EMPTY_NAMES:
-        return ("N/A",)
-    core = []
-    for t in re.findall(r"[a-z]+", n):
-        if t in _V_STOP or t in _V_FILLER or t in _V_DESC:
-            continue
-        if len(t) > 3 and t.endswith("s"):
-            t = t[:-1]
-        core.append(t)
-    core = sorted(set(core))
-    return tuple(core) if core else ("N/A",)
+def _window_track(gv: GeminiVideo, a: float, b: float):
+    """Two-pass contact track for one window: draft (+optional notes) -> self-reviewed final."""
+    base = _p("contact_track.txt", A=round(a, 1), B=round(b, 1))
+    draft = gv.watch(base + _DRAFT_SUFFIX, "", SC.CONTACT_TRACK_DRAFT,
+                     a=a, b=b, fps=FPS_CONTACT, max_tokens=8000)
+    if not draft:
+        return None
+    dtxt = json.dumps({"left": draft.get("left", []), "right": draft.get("right", [])},
+                      ensure_ascii=False)
+    notes = (draft.get("notes") or "").strip()
+    suffix = _FINAL_SUFFIX.format(draft=dtxt, notes=("\nYour notes: " + notes if notes else ""))
+    final = gv.watch(base + suffix, "", SC.CONTACT_TRACK,
+                     a=a, b=b, fps=FPS_CONTACT, max_tokens=8000)
+    return final or draft
 
 
-def _contact_pass(gv: GeminiVideo, system: str, wd: Path, dur: float, wins) -> list[dict]:
-    """One full contact-track sample -> 10fps frames {t, left_touching, right_touching}."""
-    def _one(win):
-        a, b = win
-        return gv.watch(_p("contact_track.txt", A=round(a, 1), B=round(b, 1)),
-                        system, SC.CONTACT_TRACK, a=a, b=b, fps=FPS_CONTACT, max_tokens=8000)
+def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
+    """STEP 1A — HAND-OBJECT TRACK. Each 20s window is tracked in TWO passes (draft, then a
+    final self-reviewed viewing) to kill left/right N/A swaps and N/A overuse. 1A uses ONLY
+    contact_track.txt (no system prompt). Per-window intervals expand to 10fps frames;
+    downstream (build_track / analysis / seed / dashboard) is unchanged."""
+    wins = plan_windows(s.duration, CONTACT_WIN)
+    _log(wd, f"P1a hand-object track (v49): {len(wins)} window(s) @ {FPS_CONTACT}fps "
+            f"(2-pass: draft -> self-reviewed final)")
+    results = _parallel(lambda w: _window_track(gv, w[0], w[1]), wins, wd=wd, tag="P1a contact_track")
 
-    results = _parallel(_one, wins, wd=wd, tag="P1a contact_track")
+    # collect per-hand intervals (clipped to each window) and expand to 10fps frames
     raw = {"left": [], "right": []}
     for (a, b), r in zip(wins, results):
         if not r:
@@ -372,43 +402,33 @@ def _contact_pass(gv: GeminiVideo, system: str, wd: Path, dur: float, wins) -> l
         return "empty"
 
     frames = []
-    n = max(1, int(round(dur * FPS_CONTACT)))
+    n = max(1, int(round(s.duration * FPS_CONTACT)))
     for k in range(n + 1):
         t = round(k / FPS_CONTACT, 2)
-        if t > dur + 0.001:
+        if t > s.duration + 0.001:
             break
         frames.append({"t": t, "foreground": "", "background": "",
                        "left_touching": _obj_at(raw["left"], t),
                        "right_touching": _obj_at(raw["right"], t)})
-    return frames
 
-
-def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
-    """STEP 1A — v49 HAND-OBJECT TRACK, sampled CONTACT_SAMPLES times and reconciled by
-    per-0.1s majority vote (a single pass is too unstable). Each sample expands to 10fps
-    frames; we vote per frame per hand, then build the track + object catalogue from the
-    consensus. Downstream (build_track / analysis / seed / dashboard) is unchanged."""
-    wins = plan_windows(s.duration, CONTACT_WIN)
-    _log(wd, f"P1a hand-object track (v49): {len(wins)} window(s) @ {FPS_CONTACT}fps "
-            f"x{CONTACT_SAMPLES} samples -> consensus")
-    passes = [_contact_pass(gv, system, wd, s.duration, wins) for _ in range(CONTACT_SAMPLES)]
-
-    # per-frame majority vote (all passes share the same 0.1s time grid)
-    m = min(len(p) for p in passes)
-    frames = []
-    for k in range(m):
-        row = {"t": passes[0][k]["t"], "foreground": "", "background": ""}
-        for hand, fld in (("left", "left_touching"), ("right", "right_touching")):
-            cand = [p[k].get(fld, "") for p in passes]
-            keys = [_vkey(x) for x in cand]
-            win = Counter(keys).most_common(1)[0][0]
-            if win == ("N/A",):
-                row[fld] = "empty"
-            else:                                   # show the most-voted, most-detailed name
-                same = [cand[j] for j in range(len(cand)) if keys[j] == win]
-                row[fld] = max(Counter(same).most_common(), key=lambda kv: (kv[1], len(kv[0])))[0]
-        frames.append(row)
-
+    # GUARANTEE no N/A: treat each hand as continuously holding — fill any empty 0.1s step
+    # with the object held just before it (or, for leading empties, just after). This makes
+    # N/A impossible in the track even if a window's model output slipped one in.
+    for key in ("left_touching", "right_touching"):
+        last = ""
+        for fr in frames:
+            if fr[key].lower() in _EMPTY_NAMES:
+                if last:
+                    fr[key] = last
+            else:
+                last = fr[key]
+        nxt = ""
+        for fr in reversed(frames):
+            if fr[key].lower() in _EMPTY_NAMES:
+                if nxt:
+                    fr[key] = nxt
+            else:
+                nxt = fr[key]
     s.contact_frames = frames
     s.track = build_track(frames)
     s.contact_intervals = {h: [dict(iv) for iv in s.track[h]] for h in ("left", "right")}
@@ -424,7 +444,7 @@ def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
     s.objects = list(names.values())
     nL, nR = len(s.track["left"]), len(s.track["right"])
     _log(wd, f"P1a -> {len(s.objects)} objects, track L={nL} R={nR} intervals "
-            f"({len(frames)} frames @ {FPS_CONTACT}fps, {CONTACT_SAMPLES}-sample consensus)")
+            f"({len(frames)} frames @ {FPS_CONTACT}fps, 2-pass self-review)")
 
 
 TRANS_WIN = 3.5           # sliding window length (s)
@@ -825,9 +845,214 @@ def fresh_eye(s: ClipState, system: str, wd: Path):
 # =========================================================================== #
 #  TOP-LEVEL                                                                   #
 # =========================================================================== #
+def _extract_clip(video: str, a: float, dur: float, out: str):
+    """Cut [a, a+dur] from `video` into `out`, re-encoded so the part starts exactly at `a`
+    (a fresh local-0 clock is burned per part downstream)."""
+    subprocess.run(["ffmpeg", "-v", "error", "-y", "-ss", f"{a:.3f}", "-i", video,
+                    "-t", f"{dur:.3f}", "-c:v", "libx264", "-preset", "veryfast",
+                    "-pix_fmt", "yuv420p", "-an", out], capture_output=True)
+
+
+def _shift(items, off, keys=("start_sec", "end_sec")):
+    """Return a copy of a list of dicts with the given time keys offset by `off` seconds."""
+    out = []
+    for it in items or []:
+        d = dict(it)
+        for k in keys:
+            if isinstance(d.get(k), (int, float)):
+                d[k] = round(d[k] + off, 2)
+        out.append(d)
+    return out
+
+
+def _shift_pb(pb, off):
+    out = []
+    for x in pb or []:
+        if isinstance(x, (int, float)):
+            out.append(round(x + off, 2))
+        elif isinstance(x, dict):
+            out.append(_shift([x], off, keys=("sec", "start_sec", "end_sec", "t"))[0])
+        else:
+            out.append(x)
+    return out
+
+
+def _merge_chunk_episodes(video: str, out_path: str, total_dur: float, parts: list) -> dict:
+    """Stitch independently-annotated parts (each (offset_sec, episode_dict)) into ONE episode
+    on a global timeline: time-bearing lists offset by the part's start, segment-index fields
+    shifted by the running segment count, objects unioned. Hard boundary at each seam."""
+    segs, subs, lt, rt = [], [], [], []
+    trans, cframes, flags, qa, pbs = [], [], [], [], []
+    ctrack = {"left": [], "right": []}
+    objs, dirs, goals = {}, [], []
+    seg_off = 0
+    for off, ep in parts:
+        es = _shift(ep.get("segments", []), off)
+        segs += es
+        subs += _shift(ep.get("subtasks", []), off)
+        lt += _shift(ep.get("left_timeline", []), off)
+        rt += _shift(ep.get("right_timeline", []), off)
+        trans += _shift(ep.get("_transitions", []), off, keys=("t", "sec", "start_sec", "end_sec"))
+        cframes += _shift(ep.get("_contact_frames", []), off, keys=("t",))
+        pbs += _shift_pb(ep.get("phase_boundaries", []), off)
+        for h in ("left", "right"):
+            ctrack[h] += _shift((ep.get("_contact_track") or {}).get(h, []), off)
+        for o in ep.get("objects", []) or []:
+            nm = (o.get("name") if isinstance(o, dict) else o) or ""
+            if nm and nm.lower() not in objs:
+                objs[nm.lower()] = o
+        for f in ep.get("_flags", []) or []:
+            f2 = dict(f)
+            if isinstance(f2.get("seg"), int):
+                f2["seg"] += seg_off
+            flags.append(f2)
+        for v in (ep.get("_qa") or {}).get("violations", []) or []:
+            v2 = dict(v)
+            if isinstance(v2.get("seg"), int):
+                v2["seg"] += seg_off
+            qa.append(v2)
+        dirs.append(ep.get("direction"))
+        goals.append(ep.get("goal"))
+        seg_off += len(es)
+
+    uniq_dirs = [d for d in dict.fromkeys(dirs) if d]
+    direction = uniq_dirs[0] if len(uniq_dirs) <= 1 else "mixed_or_alternating"
+    goal = " | ".join(dict.fromkeys(g for g in goals if g))
+    episode = {
+        "clip": QA.clip_id(video),
+        "duration_sec": round(total_dur, 2),
+        "goal": goal, "instruction": goal,
+        "direction": direction,
+        "phase_switch_sec": None,
+        "objects": list(objs.values()),
+        "environment": {"category": ""},
+        "meta": {"duration_sec": round(total_dur, 2),
+                 "model": "facts-first (gemini-3.1-pro + claude-opus-4-8)",
+                 "chunked": True, "n_chunks": len(parts), "chunk_sec": CHUNK_SEC,
+                 "chunk_offsets": [round(o, 2) for o, _ in parts],
+                 "chunk_directions": dirs, "chunk_goals": goals},
+        "phase_boundaries": pbs,
+        "_transitions": trans,
+        "_contact_frames": cframes,
+        "segments": segs,
+        "subtasks": subs,
+        "left_timeline": lt, "right_timeline": rt,
+        "_track": {}, "_contact_track": ctrack,
+        "_bursts_reduced": [], "_direction_burst_summary": "",
+        "_flags": flags,
+        "_seg_trace": [],
+        "_trace": {},
+        "_qa": {"violations": qa},
+        "_gate_findings": [], "_purpose_verdict": {},
+        "_analysis_report": {}, "_fresh_eye": "",
+        "_stages": [], "_clocked": "",
+        "override_applied": False,
+    }
+    Path(out_path).parent.mkdir(parents=True, exist_ok=True)
+    Path(out_path).write_text(json.dumps(episode, indent=2))
+    return episode
+
+
+def _repair_seams(video: str, out_path: str, parts: list, merged: dict,
+                  wd: Path, max_attempts: int) -> dict:
+    """Re-flow every boundary so an action straddling a seam is NOT cut. For each seam, take
+    the last segment before it and the first segment after it, re-extract that combined span
+    from the ORIGINAL video, re-run full segmentation+annotation on it, and splice the result
+    back in place of those two segments. Then rebuild the deliverable timelines."""
+    segs = list(merged["segments"])
+    offsets = [o for o, _ in parts]
+    # 1) identify every seam region against the (unspliced) merged segments
+    jobs = []
+    for i in range(1, len(parts)):
+        seam_t = offsets[i]
+        left = [j for j, s in enumerate(segs) if s["end_sec"] <= seam_t + 0.25]
+        right = [j for j, s in enumerate(segs) if s["start_sec"] >= seam_t - 0.25]
+        if not left or not right:
+            continue
+        li = max(left, key=lambda j: segs[j]["end_sec"])
+        ri = min(right, key=lambda j: segs[j]["start_sec"])
+        if ri <= li:
+            continue
+        a, b = segs[li]["start_sec"], segs[ri]["end_sec"]
+        if b - a >= 0.5:
+            jobs.append((i, li, ri, a, b, seam_t))
+
+    # 2) re-segment + re-annotate every seam span IN PARALLEL (each is independent)
+    def _do_seam(job):
+        i, li, ri, a, b, seam_t = job
+        seam_clip = str(wd / f"seam{i}.mp4")
+        _extract_clip(video, a, b - a, seam_clip)
+        _log(wd, f"-- seam {i}: re-flow [{a:.1f}-{b:.1f}s] across boundary {seam_t:.1f}s")
+        ep = _annotate_single(seam_clip, str(wd / f"seam{i}.json"),
+                              str(wd / f"seam{i}"), 2, max_attempts, False)
+        return (li, ri, _shift(ep.get("segments", []), a))
+
+    if jobs:
+        _log(wd, f"-- re-flowing {len(jobs)} seam(s) IN PARALLEL")
+        res = _parallel(_do_seam, jobs, levels=(len(jobs), 1), wd=wd, tag="seam re-flow")
+        # 3) splice highest-index first so the lower indices stay valid (seams never overlap)
+        for li, ri, new in sorted([r for r in res if r], key=lambda r: r[0], reverse=True):
+            if new:
+                segs = segs[:li] + new + segs[ri + 1:]
+
+    segs.sort(key=lambda s: s["start_sec"])
+    merged["segments"] = segs
+    merged["subtasks"] = [{**s, "needs_review": False} for s in segs]
+    merged["left_timeline"] = QA._derive_lane(segs, "left")
+    merged["right_timeline"] = QA._derive_lane(segs, "right")
+    merged["meta"]["seams_repaired"] = max(0, len(parts) - 1)
+    Path(out_path).write_text(json.dumps(merged, indent=2))
+    return merged
+
+
 def annotate(video: str, out_path: str, workdir: str | None = None,
              max_passes: int = 2, max_attempts: int = 3,
              apply_overrides: bool = False) -> dict:
+    """Public entry: short videos go straight through; long ones (> CHUNK_SEC * 1.1) are
+    split into even <= CHUNK_SEC parts, each annotated independently, merged, then each seam
+    is re-segmented across the boundary so straddling actions flow."""
+    dur = probe_duration(video)
+    if dur <= CHUNK_SEC * 1.1:
+        return _annotate_single(video, out_path, workdir, max_passes, max_attempts, apply_overrides)
+
+    wd = Path(workdir or f"logs/{Path(video).stem}")
+    wd.mkdir(parents=True, exist_ok=True)
+    n = max(1, math.ceil(dur / CHUNK_SEC))
+    clen = dur / n
+    _log(wd, f"=== annotate {Path(video).name} ({dur:.1f}s) -> CHUNKED into {n} parts "
+            f"of {clen:.1f}s each ===")
+    specs = []
+    for i in range(n):
+        a = i * clen
+        part_len = min(clen, dur - a)
+        part_video = str(wd / f"part{i + 1}.mp4")
+        _extract_clip(video, a, part_len, part_video)
+        specs.append((i, a, part_video, part_len))
+        _log(wd, f"-- part {i + 1}/{n}: [{a:.1f}-{a + part_len:.1f}s] -> {Path(part_video).name}")
+
+    def _do_part(spec):
+        i, a, pv, _plen = spec
+        ep = _annotate_single(pv, str(wd / f"part{i + 1}.json"),
+                              str(wd / f"part{i + 1}"), max_passes, max_attempts, apply_overrides)
+        return (a, ep)
+
+    _log(wd, f"-- annotating {n} parts IN PARALLEL")
+    results = _parallel(_do_part, specs, levels=(n, max(1, n // 2), 1), wd=wd, tag="chunk parts")
+    parts = sorted([r for r in results if r], key=lambda p: p[0])
+    if not parts:
+        raise RuntimeError("all chunk parts failed")
+    if len(parts) < n:
+        _log(wd, f"WARNING: {n - len(parts)} of {n} parts failed -> merging the {len(parts)} that succeeded")
+    merged = _merge_chunk_episodes(video, out_path, dur, parts)
+    merged = _repair_seams(video, out_path, parts, merged, wd, max_attempts)
+    _log(wd, f"=== DONE (chunked) {len(merged['segments'])} segments across {n} parts "
+            f"({n - 1} seams re-flowed) -> {out_path} ===")
+    return merged
+
+
+def _annotate_single(video: str, out_path: str, workdir: str | None = None,
+                     max_passes: int = 2, max_attempts: int = 3,
+                     apply_overrides: bool = False) -> dict:
     t0 = time.time()
     wd = Path(workdir or f"logs/{Path(video).stem}")
     wd.mkdir(parents=True, exist_ok=True)

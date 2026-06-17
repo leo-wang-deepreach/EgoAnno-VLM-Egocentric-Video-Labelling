@@ -50,3 +50,6 @@ run_batch.sh
 
 # generated dashboard manifest
 factsfirst_manifest.json
+
+# local batch launcher (hardcodes private test-video paths)
+run_batch30.sh

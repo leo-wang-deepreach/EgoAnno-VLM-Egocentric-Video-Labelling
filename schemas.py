@@ -31,6 +31,14 @@ CONTACT_TRACK = {
     "properties": {"left": _TRACK_IVS, "right": _TRACK_IVS},
     "required": ["left", "right"],
 }
+# first-viewing DRAFT: same track plus optional free-text notes the model can leave for
+# itself to resolve on the second (final) viewing
+CONTACT_TRACK_DRAFT = {
+    "type": "OBJECT",
+    "properties": {"left": _TRACK_IVS, "right": _TRACK_IVS,
+                   "notes": {"type": "STRING"}},
+    "required": ["left", "right"],
+}
 
 # Phase 4 — seg_reconcile (v49): per-stretch "one action or several?" -> split cuts
 SEG_RECONCILE = {
