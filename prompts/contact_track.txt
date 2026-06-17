@@ -3,24 +3,23 @@ Watch this first-person, top-down two-handed manipulation clip from t=<<A>>s to 
 YOUR TASK: for EACH hand, report the OBJECT it is manipulating over time — the workpiece it is holding, moving, assembling, or working on (what a robot would grip to reproduce the motion) — as a list of time intervals.
 
 HOW TO LOOK (do this to avoid left/right mistakes):
-A hand's identity comes ONLY from which side its forearm enters the frame: the forearm coming in from the LEFT edge is the LEFT hand; from the RIGHT edge is the RIGHT hand.
-Track ONE hand at a time. First follow the LEFT hand through the whole window and write its intervals. THEN, separately, follow the RIGHT hand through the whole window. Never decide both hands at the same instant — judging them together is exactly what makes left and right get swapped. When the hands cross or one is briefly hidden, re-find each forearm from its entry side before continuing.
+Each hand has a coloured circle burned into the video: the GREEN circle marks the LEFT hand, the BLUE circle marks the RIGHT hand. Read each hand's identity straight from its circle colour — do not guess from position or forearm side. Track ONE hand at a time: follow the GREEN (LEFT) circle through the whole window and write its intervals, then separately follow the BLUE (RIGHT) circle. When the hands cross or overlap, keep following each hand by its circle colour.
 
 WHAT EACH HAND IS HOLDING:
-- Both hands are working a part at EVERY moment of these clips, so every interval names a real object. NEVER output "N/A" or leave a hand empty. If a hand briefly looks empty — just released one piece, mid-reach, resting, or partly hidden — it is still on its piece or immediately taking the next, so name that object, not nothing.
+- Report what each hand is genuinely holding or working. If a hand is NOT holding/working any object — empty, just reaching, resting, or hovering with nothing in it — report "N/A" for that stretch. Only name an object when the hand is actually manipulating one; never invent a hold to fill a gap.
 - Report the PART, never the thing it goes INTO or rests ON. A bag, box, tray, or the table is not the answer — unless a hand's whole job is holding that container open/steady, in which case the container IS what that hand controls; but a hand that is actually working the parts reports the part, not the container.
 - Name only an object you can actually see in that hand. Do NOT invent thin/vague objects (a "strip", "slip", "film", "cover", "wrapper"); give your plainest honest description of the real workpiece.
 
 NAMING & INTERVALS:
 - Name each object precisely by what you see — its colour/material and which kind of part — and reuse that exact name whenever it is the same object.
 - When pieces are joined and handled as one, name that combined unit; once they separate, name the single piece each hand holds. A joined unit and its separate pieces are different answers.
-- Start a NEW interval whenever anything meaningful changes for that hand: a different object, a different COLOUR or individual piece of the same kind, or a clear change in how it is handling the piece (takes up a fresh one, sets one down, joins/separates). The result should be MEANINGFUL chunks for later labeling — not one giant block, not 0.1s flicker. Do not insert "N/A" between two real holds for a split-second release; go straight from one object to the next.
+- Start a NEW interval whenever anything meaningful changes for that hand: picks up or sets down an object, switches to a different object / COLOUR / individual piece, changes how it handles the piece (joins/separates), or goes empty (N/A) ↔ holding. The result should be MEANINGFUL chunks for later labeling — not one giant block, not 0.1s flicker. A genuine empty stretch is "N/A"; don't flicker "N/A" for a split-second hand-off between two real holds.
 - Each hand's intervals are back-to-back with no gaps, covering t=<<A>>s to t=<<B>>s.
 
 CHECKLIST — before you answer, verify every item:
-1. Is each object on the CORRECT hand? Re-confirm each forearm from its entry side. (Swapped left/right is the most common mistake.)
-2. Did you avoid "N/A" completely? Every interval must name a real object.
-3. No containers/surfaces as the answer (unless a hand trulyof  only holds the container); no invented thin objects.
+1. Is each object on the CORRECT hand? Re-confirm by circle colour: GREEN = LEFT, BLUE = RIGHT.
+2. Did you use "N/A" exactly where a hand holds/works nothing — and name a real object everywhere it does?
+3. No containers/surfaces as the answer (unless a hand's only job is holding the container steady); no invented thin objects.
 4. Are real object / colour / handling changes split into separate intervals (not merged into one block)?
 
 OUTPUT raw JSON only, exactly this shape (include "notes" ONLY when asked for a first viewing; otherwise omit it):

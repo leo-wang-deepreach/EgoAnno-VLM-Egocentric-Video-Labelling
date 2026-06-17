@@ -23,11 +23,14 @@ def main():
                     help="max full Phase 4-5 quality-rerun attempts (facts cached)")
     ap.add_argument("--apply-overrides", action="store_true",
                     help="apply out/overrides/<id>.yaml at export (OFF for honest eval)")
+    ap.add_argument("--no-hand-overlay", action="store_true",
+                    help="disable the YOLO green=L/blue=R hand-circle overlay pre-step")
     args = ap.parse_args()
 
     ep = annotate(args.video, args.out, workdir=args.workdir,
                   max_passes=args.passes, max_attempts=args.attempts,
-                  apply_overrides=args.apply_overrides)
+                  apply_overrides=args.apply_overrides,
+                  hand_overlay=not args.no_hand_overlay)
     print(f"\nclip={ep['clip']} direction={ep['direction']} "
           f"segments={len(ep['segments'])} qa={len(ep['_qa']['violations'])}")
     print(f"goal: {ep['goal']}")

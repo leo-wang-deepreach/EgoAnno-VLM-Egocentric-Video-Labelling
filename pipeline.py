@@ -26,6 +26,7 @@ import json
 import math
 import re
 import subprocess
+import sys
 import time
 from collections import Counter
 from pathlib import Path
@@ -1005,12 +1006,49 @@ def _repair_seams(video: str, out_path: str, parts: list, merged: dict,
     return merged
 
 
+_YOLO = HERE.parent / "yolo_hands"
+_HAND_MODEL = _YOLO / "yolo_bundle" / "hand_yolo_detector@20260314.pt"
+
+
+def _hand_overlay(video: str, workdir: str | None) -> str:
+    """Pre-step: burn GREEN=LEFT / BLUE=RIGHT hand circles (slight spotlight) into the
+    raw video at SOURCE fps via the yolo_hands handpose model, so the clocked working
+    video every stage reads carries authoritative L/R hand grounding. Returns the
+    overlaid path; on ANY failure falls back to the raw video so the pipeline still runs."""
+    wd = Path(workdir or f"logs/{Path(video).stem}")
+    wd.mkdir(parents=True, exist_ok=True)
+    indir, outdir = wd / "_ov_in", wd / "_ov_out"
+    indir.mkdir(exist_ok=True); outdir.mkdir(exist_ok=True)
+    link = indir / Path(video).name
+    try:
+        if link.is_symlink() or link.exists():
+            link.unlink()
+        link.symlink_to(Path(video).resolve())          # isolate one video for --videos-dir
+        cmd = [sys.executable, str(_YOLO / "detect_hands.py"),
+               "--handpose", "--model", str(_HAND_MODEL),
+               "--shape", "circle", "--circle-expand", "60", "--dim", "0.6",
+               "--detect-mult", "1", "--hold-sec", "0", "--radius-cap", "0.15",
+               "--native-fps", "--fps", "10", "--workers", "1",
+               "--videos-dir", str(indir), "--out-dir", str(outdir)]
+        r = subprocess.run(cmd, capture_output=True, text=True)
+        produced = outdir / f"{Path(video).stem}_hands.mp4"
+        if r.returncode == 0 and produced.exists():
+            _log(wd, f"hand overlay (green=L / blue=R circles, slight spotlight) -> {produced.name}")
+            return str(produced)
+        _log(wd, f"WARNING hand overlay failed rc={r.returncode}; using raw video :: {(r.stderr or '')[-300:]}")
+    except Exception as e:                                # noqa: BLE001
+        _log(wd, f"WARNING hand overlay error: {e}; using raw video")
+    return video
+
+
 def annotate(video: str, out_path: str, workdir: str | None = None,
              max_passes: int = 2, max_attempts: int = 3,
-             apply_overrides: bool = False) -> dict:
+             apply_overrides: bool = False, hand_overlay: bool = True) -> dict:
     """Public entry: short videos go straight through; long ones (> CHUNK_SEC * 1.1) are
     split into even <= CHUNK_SEC parts, each annotated independently, merged, then each seam
     is re-segmented across the boundary so straddling actions flow."""
+    if hand_overlay:
+        video = _hand_overlay(video, workdir)            # burn L/R hand circles -> all stages see them
     dur = probe_duration(video)
     if dur <= CHUNK_SEC * 1.1:
         return _annotate_single(video, out_path, workdir, max_passes, max_attempts, apply_overrides)
