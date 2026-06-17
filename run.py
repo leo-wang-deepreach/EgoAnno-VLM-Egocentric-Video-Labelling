@@ -18,21 +18,9 @@ def main():
     ap.add_argument("video")
     ap.add_argument("--out", required=True)
     ap.add_argument("--workdir", default=None)
-    ap.add_argument("--passes", type=int, default=2, help="max rough->refine passes")
-    ap.add_argument("--attempts", type=int, default=3,
-                    help="max full Phase 4-5 quality-rerun attempts (facts cached)")
-    ap.add_argument("--apply-overrides", action="store_true",
-                    help="apply out/overrides/<id>.yaml at export (OFF for honest eval)")
-    ap.add_argument("--no-hand-overlay", action="store_true",
-                    help="disable the YOLO green=L/blue=R hand-circle overlay pre-step")
-    ap.add_argument("--facts-first", action="store_true",
-                    help="use the legacy facts-first flow (1A/1C-seeded); DEFAULT is the lean circle-grounded flow")
     args = ap.parse_args()
 
-    ep = annotate(args.video, args.out, workdir=args.workdir,
-                  max_passes=args.passes, max_attempts=args.attempts,
-                  apply_overrides=args.apply_overrides,
-                  hand_overlay=not args.no_hand_overlay, lean=not args.facts_first)
+    ep = annotate(args.video, args.out, workdir=args.workdir)
     print(f"\nclip={ep['clip']} direction={ep['direction']} "
           f"segments={len(ep['segments'])} qa={len(ep['_qa']['violations'])}")
     print(f"goal: {ep['goal']}")

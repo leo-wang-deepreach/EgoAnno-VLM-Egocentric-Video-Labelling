@@ -1,23 +1,32 @@
 #!/usr/bin/env python3
-"""pipeline.py — the facts-first orchestrator.
+"""pipeline.py — egocentric two-handed manipulation -> per-hand action timeline.
 
-ONE timeline, progressively refined: each stage reads it and rewrites it in place.
-Facts are computed once; the dense 0.1s contact facts ARE the starting timeline.
+ONE pipeline, no modes/flags. The segment->verify block runs in a keep-best rerun loop
+(<= max_attempts); the verifier's feedback picks the re-entry stage (relabel by default,
+full re-segment on a direction flip).
 
-  FACTS (once):
-    1A contact_track  (Gemini 10fps) objects + fg/bg + per-hand contact  -> SEED the timeline
-    1C transitions    (Claude opus, sliding 30fps windows) place/pickup/throw/handoff
-    2  bursts         (Gemini 30fps) rotation/role/colour -> deterministic reduce
-    3  direction      (Gemini 10fps whole) direction + derived goal
-  REFINE the one timeline (retry loop, keep best by gate verdict; then fresh-eye once):
-    4  label+collapse (Gemini 10fps) dense facts -> per-hand action sentences (bottom-up)
-    5  verifier       (opus, text) refine_timeline -> model-judged corrected timeline
-    6  code-analysis  (analysis.py) READ-ONLY advisory signals (no timeline change)
-    7  gate + QA      (opus, frames) edits timeline + quality verdict -> deterministic QA
-    8  fresh-eye      (opus) context-free review of clip w/ labels overlaid -> final edit
+  raw video
+   -> P0  hand overlay   (yolo handpose) burn GREEN=L / BLUE=R circles into the video
+   -> P0b clock burn      timestamp + audio strip -> the one video every stage reads
+   -> P1  bursts          (opus, frames) rotation/role/colour -> deterministic reduce
+   -> P2  direction       (Gemini 10fps whole) direction + derived goal
+   -> LOOP <= max_attempts, keep best by (verdict, -#segs):
+        S   segment        (Gemini 10fps)         cut times only
+        S+  seg-reconcile  (Gemini, per long seg) split swallowed multi-action cycles
+        A   label          (Gemini 10fps, per-seg)per-hand labels on the fixed spans
+        R   atomic-contract(deterministic)        fuzzy same-action merge + chained flag
+        S2  merge-critic   (opus, frames)         delete-only merge of over-split fragments
+        PP  pick<->place   (Gemini 10fps whole)   completeness chain: every pick has a
+                                                  matching place / handoff, and vice versa
+        V   verifier       (opus, frames)         verdict + corrections + rerun feedback
+   -> W   global audit     (GPT-5.5, frames)      3rd-family whole-clip corrected timeline
   export -> episode.json (+ _stages trace, _qa) -> dashboard
 
-Retired (v49 top-down path) lives under unused/.
+Long clips (> CHUNK_SEC) are split into <= CHUNK_SEC parts, each run through the SAME
+pipeline in parallel, then merged and every seam re-flowed.
+
+Retired v49 top-down path lives under unused/; the earlier facts-first (1A/1C) orchestrator
+is preserved in git history (tags <= v43).
 """
 from __future__ import annotations
 
@@ -38,8 +47,8 @@ import schemas as SC
 from clipstate import (ClipState, Flag, Segment, build_track,
                        derive_track_from_labels, track_possession_changes)
 from media import burn_clock, probe_duration, render_labeled, render_strip
-from models import (CLAUDE_GATE, GEMINI_NATIVE, USAGE,
-                    GeminiFrames, GeminiVideo, claude_call)
+from models import (CLAUDE_GATE, GEMINI_NATIVE, GPT_MODEL, USAGE,
+                    GeminiFrames, GeminiVideo, claude_call, gpt_call)
 
 HERE = Path(__file__).resolve().parent
 PROMPTS = HERE / "prompts"
@@ -133,17 +142,6 @@ def _snap(s: ClipState, stage: str, wd: Path | None = None):
 # --------------------------------------------------------------------------- #
 #  THE TIMELINE — one structure, progressively refined                        #
 # --------------------------------------------------------------------------- #
-def _contact_summary(s: ClipState) -> str:
-    """The RELIABLE 1A possession, collapsed to per-hand object intervals (the authority
-    for who-holds-what / who-is-idle), as compact text for the timeline stages."""
-    tr = build_track(s.contact_frames)
-    out = []
-    for hand, H in (("left", "L"), ("right", "R")):
-        ivs = tr.get(hand, [])
-        parts = [f"{iv.get('interacting_with', '?')} [{iv['start_sec']:.1f}-{iv['end_sec']:.1f}]"
-                 for iv in ivs]
-        out.append(f"{H}: " + ("; ".join(parts) if parts else "empty/absent"))
-    return "\n".join(out)
 
 
 def _transitions_text(s: ClipState) -> str:
@@ -152,44 +150,6 @@ def _transitions_text(s: ClipState) -> str:
         return "(none detected)"
     return "\n".join(f"{float(e['t']):.1f}s {e.get('hand', '?')} {e.get('kind', '?')} "
                      f"of {e.get('object', '?')}" for e in ev)
-
-
-def _apply_timeline(s: ClipState, segs_raw, prov: str, wd: Path, label: str) -> bool:
-    """Validate a model-returned timeline and make it THE timeline (in place). Rejects an
-    empty/degenerate result (keeps the previous timeline). Returns True if applied."""
-    clean = []
-    for seg in segs_raw or []:
-        if not isinstance(seg, dict):                  # model sometimes emits a bare string
-            continue                                   # in the segments array -> skip it
-        a, b = seg.get("start_sec"), seg.get("end_sec")
-        if a is None or b is None:
-            continue
-        try:
-            a, b = float(a), float(b)
-        except (TypeError, ValueError):
-            continue
-        if b - a < 0.05 or a < -0.1 or b > s.duration + 0.5:
-            continue
-        clean.append((max(0.0, a), min(s.duration, b),
-                      str(seg.get("left") or "N/A"), str(seg.get("right") or "N/A")))
-    clean.sort()
-    if not clean or (len(clean) == 1 and s.duration > 6):
-        _log(wd, f"{label}: degenerate timeline ({len(clean)} segs) -> kept previous")
-        return False
-    rebuilt = []
-    for a, b, lft, rgt in clean:
-        sg = Segment(start=round(a, 2), end=round(b, 2), left=lft, right=rgt)
-        sg.boundary_provenance = prov
-        rebuilt.append(sg)
-    s.segments = rebuilt
-    # LOCKED-TRANSITION INVARIANT (one chokepoint): NO model-returned timeline may merge
-    # across a detected place/pickup/throw/handoff. Whatever the verifier/gate/fresh-eye
-    # returned, re-split any segment that now bridges a detected transition — a real action
-    # boundary can never be erased downstream. This is the sharp version of the fresh-eye
-    # %-guard: it protects the exact moments that matter, not a blunt segment-count ratio.
-    _enforce_cuts(s, _locked_transitions(s), wd)
-    s.track = derive_track_from_labels(s.segments)
-    return True
 
 
 def _locked_transitions(s: ClipState) -> list[float]:
@@ -236,100 +196,6 @@ def _enforce_cuts(s: ClipState, cut_times: list[float], wd: Path):
         _log(wd, f"P4 enforce: split {changed} swallowed transition(s) at {cut_times}")
 
 
-def label_and_collapse(s: ClipState, gv: GeminiVideo, system: str, wd: Path,
-                       feedback: str = ""):
-    """STEP 4: watch the clip at 10fps + the reliable dense facts, and lay out the per-hand
-    action timeline — cut at EVERY action change, collapse only truly-steady runs. Detected
-    transitions are REQUIRED cuts (a transition is never swallowed). On a rerun, `feedback`
-    is the gate's detailed punch-list from the previous attempt — applied directly here so
-    the labeler fixes the named defects instead of repeating them."""
-    # NOTE: the narrative goal is deliberately NOT passed here — it was poisoning every
-    # span with a false count/structure ("repeatedly thread nuts onto a single bolt"). The
-    # labeler reads the frames + facts; goal stays in the direction/gate stages only.
-    prompt = _p("label_collapse.txt", B=round(s.duration, 1),
-                DIRECTION=s.direction or "(unknown)",
-                INVENTORY=s.objects_line(), CONTACT=_contact_summary(s),
-                TRANSITIONS=_transitions_text(s),
-                REQUIRED_CUTS=_required_cuts_text(s),
-                FEEDBACK=(feedback.strip() or "(first attempt — no prior feedback yet)"),
-                BURSTS="\n".join(s.bursts_reduced) or "(none)")
-    r = gv.watch(prompt, system, SC.TIMELINE, a=0.0, b=s.duration,
-                 fps=FPS_LABEL, max_tokens=8000)
-    # _apply_timeline re-enforces the locked transitions itself (the global invariant),
-    # so the collapse can never swallow one — no separate enforce call needed here.
-    _apply_timeline(s, r.get("segments"), "collapse", wd, "P4 label+collapse")
-    _log(wd, f"P4 label+collapse -> {len(s.segments)} segments (transitions enforced)")
-
-
-def refine_timeline(s: ClipState, system: str, wd: Path):
-    """STEP 5 verifier (model-judged, text-only): read the timeline + the reliable
-    possession facts, RETURN the corrected timeline (object consistency, hand-role,
-    contact-grounded N/A, redundant/missing). No hardcoded rules."""
-    if not s.segments:
-        return
-    prompt = _p("refine_timeline.txt", DIRECTION=s.direction or "(unknown)",
-                GOAL=s.goal or "(unknown)", CONTACT=_contact_summary(s),
-                TIMELINE=s.timeline_text())
-    try:
-        r = claude_call(prompt, [], system, SC.TIMELINE_LC, model=CLAUDE_GATE,
-                        max_tokens=8000)
-    except RuntimeError:
-        _log(wd, "P5 verifier: call failed -> kept timeline")
-        return
-    note = str(r.get("think", ""))[:120]
-    if _apply_timeline(s, r.get("segments"), "verifier", wd, "P5 verifier"):
-        _log(wd, f"P5 verifier -> {len(s.segments)} segments | {note}")
-
-
-def _seed_timeline(s: ClipState):
-    """STEP 1 seed: THE timeline starts as the dense 0.1s facts — one segment per
-    contact-state, each hand's slot = the OBJECT it holds (or N/A if empty). The labeler
-    later collapses these into action sentences."""
-    tr = build_track(s.contact_frames)
-    edges = {0.0, round(s.duration, 2)}
-    for h in ("left", "right"):
-        for iv in tr.get(h, []):
-            edges.add(round(iv["start_sec"], 2)); edges.add(round(iv["end_sec"], 2))
-    bounds = sorted(e for e in edges if 0.0 <= e <= s.duration)
-
-    def _obj_at(hand, t):
-        for iv in tr.get(hand, []):
-            if iv["start_sec"] - 0.01 <= t < iv["end_sec"] + 0.01:
-                o = str(iv.get("interacting_with", "") or "").strip()
-                return o if o and o.lower() not in ("empty", "none", "n/a", "out of frame") else "N/A"
-        return "N/A"
-
-    segs = []
-    for a, b in _spans(bounds):
-        if b - a < 0.05:
-            continue
-        mid = (a + b) / 2
-        sg = Segment(start=round(a, 2), end=round(b, 2),
-                     left=_obj_at("left", mid), right=_obj_at("right", mid))
-        sg.boundary_provenance = "1a_seed"
-        segs.append(sg)
-
-    # NO N/A: a hand is treated as continuously holding — carry the last real object across
-    # any residual N/A span (forward, then backward to cover a leading N/A). Only a hand that
-    # is N/A for the ENTIRE clip stays N/A.
-    for attr in ("left", "right"):
-        last = None
-        for sg in segs:
-            v = (getattr(sg, attr) or "").strip()
-            if v and v.upper() != "N/A":
-                last = v
-            elif last:
-                setattr(sg, attr, last)
-        nxt = None
-        for sg in reversed(segs):
-            v = (getattr(sg, attr) or "").strip()
-            if v and v.upper() != "N/A":
-                nxt = v
-            elif nxt and (not v or v.upper() == "N/A"):
-                setattr(sg, attr, nxt)
-    s.segments = segs
-
-
 # =========================================================================== #
 #  PHASE 1 — the fact layer                                                    #
 # =========================================================================== #
@@ -367,147 +233,8 @@ def _window_track(gv: GeminiVideo, a: float, b: float):
     return final or draft
 
 
-def phase1_contact(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
-    """STEP 1A — HAND-OBJECT TRACK. Each 20s window is tracked in TWO passes (draft, then a
-    final self-reviewed viewing) to kill left/right N/A swaps and N/A overuse. 1A uses ONLY
-    contact_track.txt (no system prompt). Per-window intervals expand to 10fps frames;
-    downstream (build_track / analysis / seed / dashboard) is unchanged."""
-    wins = plan_windows(s.duration, CONTACT_WIN)
-    _log(wd, f"P1a hand-object track (v49): {len(wins)} window(s) @ {FPS_CONTACT}fps "
-            f"(2-pass: draft -> self-reviewed final)")
-    results = _parallel(lambda w: _window_track(gv, w[0], w[1]), wins, wd=wd, tag="P1a contact_track")
-
-    # collect per-hand intervals (clipped to each window) and expand to 10fps frames
-    raw = {"left": [], "right": []}
-    for (a, b), r in zip(wins, results):
-        if not r:
-            continue
-        for hand in ("left", "right"):
-            for iv in r.get(hand, []) or []:
-                try:
-                    sa, sb = float(iv.get("start_sec")), float(iv.get("end_sec"))
-                except (TypeError, ValueError):
-                    continue
-                sa, sb = max(a, sa), min(b, sb)
-                if sb <= sa:
-                    continue
-                raw[hand].append((round(sa, 2), round(sb, 2),
-                                  str(iv.get("interacting_with", "") or "empty").strip()))
-    for hand in ("left", "right"):
-        raw[hand].sort()
-
-    def _obj_at(ivs, t):
-        for (sa, sb, nm) in ivs:
-            if sa - 0.001 <= t < sb + 0.001:
-                return nm or "empty"
-        return "empty"
-
-    frames = []
-    n = max(1, int(round(s.duration * FPS_CONTACT)))
-    for k in range(n + 1):
-        t = round(k / FPS_CONTACT, 2)
-        if t > s.duration + 0.001:
-            break
-        frames.append({"t": t, "foreground": "", "background": "",
-                       "left_touching": _obj_at(raw["left"], t),
-                       "right_touching": _obj_at(raw["right"], t)})
-
-    # GUARANTEE no N/A: treat each hand as continuously holding — fill any empty 0.1s step
-    # with the object held just before it (or, for leading empties, just after). This makes
-    # N/A impossible in the track even if a window's model output slipped one in.
-    for key in ("left_touching", "right_touching"):
-        last = ""
-        for fr in frames:
-            if fr[key].lower() in _EMPTY_NAMES:
-                if last:
-                    fr[key] = last
-            else:
-                last = fr[key]
-        nxt = ""
-        for fr in reversed(frames):
-            if fr[key].lower() in _EMPTY_NAMES:
-                if nxt:
-                    fr[key] = nxt
-            else:
-                nxt = fr[key]
-    s.contact_frames = frames
-    s.track = build_track(frames)
-    s.contact_intervals = {h: [dict(iv) for iv in s.track[h]] for h in ("left", "right")}
-
-    # derive the object catalogue from the interval names (no separate inventory stage)
-    names: dict[str, dict] = {}
-    for hand in ("left", "right"):
-        for iv in s.track[hand]:
-            nm = str(iv.get("interacting_with", "")).strip()
-            if nm and nm.lower() not in _EMPTY_NAMES \
-                    and nm.lower() not in {k.lower() for k in names}:
-                names[nm] = {"name": nm}
-    s.objects = list(names.values())
-    nL, nR = len(s.track["left"]), len(s.track["right"])
-    _log(wd, f"P1a -> {len(s.objects)} objects, track L={nL} R={nR} intervals "
-            f"({len(frames)} frames @ {FPS_CONTACT}fps, 2-pass self-review)")
-
-
 TRANS_WIN = 3.5           # sliding window length (s)
 TRANS_STRIDE = 2.0        # window stride (s)
-
-
-def phase1_transitions(s: ClipState, system: str, wd: Path, hint: str = ""):
-    """Detect place/pickup/handoff by SLIDING a short window across the clip and asking
-    Claude opus, per window, ONLY 'is anything set down / picked up / handed off here?'.
-    Focused attention is where the model actually perceives these brief events (the
-    whole-clip pass and the contact track both miss them). Events dedup within 0.6s."""
-    wins = []
-    t = 0.0
-    while t < s.duration - 0.5:
-        wins.append((round(t, 2), round(min(t + TRANS_WIN, s.duration), 2)))
-        t += TRANS_STRIDE
-    _log(wd, f"P1c transition scan: {len(wins)} windows x {TRANS_WIN}s @ {FPS_EDGE}fps (opus)")
-
-    def _one(win):
-        wa, wb = win
-        frames, _ = render_strip(s.clocked, wa, wb, FPS_EDGE, s.track, str(wd),
-                                 ctx=0.0, cap_frames=36, max_side=720)
-        prompt = _p("transition_window.txt", WA=round(wa, 1), WB=round(wb, 1))
-        if hint:
-            prompt += f"\n\nReviewer hint about likely missed transitions: {hint}"
-        r = claude_call(prompt, frames, system, SC.WINDOW_TRANSITIONS,
-                        model=CLAUDE_GATE, max_tokens=1500)   # raises -> _parallel retries
-        out = []
-        for e in r.get("events", []):
-            tt = e.get("t")
-            if tt is not None and wa - 0.05 <= float(tt) <= wb + 0.05:
-                out.append(e)
-        return out
-
-    allev = []
-    for evs in _parallel(_one, wins, wd=wd, tag="P1c transition scan"):
-        allev.extend(evs or [])                            # None (failed all levels) -> skip
-    # Keep the initial pick and final place (the user wants them). Only drop edge HAND-OFFS
-    # (a hand-off at t=0 is the spurious "receive/give" artifact); keep place/pickup at edges.
-    def _edge_ok(e):
-        t = float(e["t"])
-        if not (0.1 < t < s.duration - 0.1):
-            return False
-        if e.get("kind") == "handoff" and (t < 0.5 or t > s.duration - 0.5):
-            return False
-        return True
-    allev = [e for e in allev if e.get("t") is not None and _edge_ok(e)]
-    # dedup: collapse same-kind events within 1.2s into one (kills redundant pick/pick
-    # clusters that produced duplicate "pick up" segments); keep distinct kinds apart.
-    allev.sort(key=lambda e: float(e["t"]))
-    merged = []
-    for e in allev:
-        if merged and abs(float(e["t"]) - float(merged[-1]["t"])) < 1.2 \
-                and e.get("kind") == merged[-1].get("kind"):
-            continue
-        merged.append(e)
-    s.transitions = merged
-    kinds = {}
-    for e in merged:
-        kinds[e.get("kind", "?")] = kinds.get(e.get("kind", "?"), 0) + 1
-    _log(wd, f"P1c -> {len(merged)} transition events {kinds} "
-            f"at {[round(float(e['t']),1) for e in merged]}")
 
 
 # =========================================================================== #
@@ -691,8 +418,6 @@ def completeness_check(s: ClipState, gv: GeminiVideo, system: str, wd: Path) -> 
     return added
 
 
-
-
 # =========================================================================== #
 #  PHASE 5 — gate + export                                                     #
 # =========================================================================== #
@@ -778,69 +503,6 @@ def phase5_gate(s: ClipState, gv: GeminiVideo, system: str, wd: Path):
 # =========================================================================== #
 #  PHASE 6 — fresh-eye final review (context-free)                            #
 # =========================================================================== #
-def fresh_eye(s: ClipState, system: str, wd: Path):
-    """FINAL pass: show opus the whole clip with the assigned L/R labels overlaid and
-    NOTHING else (no flags, no track, no analysis, no bursts) — fresh eyes re-read the
-    pixels and return a corrected timeline so the labels match the video and the
-    sequence makes sense. Last word before export; degenerate rewrites are rejected."""
-    if not s.segments:
-        return
-    frames = render_labeled(s.clocked, s.segments, FPS_FRESH, str(wd),
-                            max_side=720, cap_frames=80)
-    if not frames:
-        return
-    try:
-        r = claude_call(_p("fresh_eye.txt", TIMELINE=s.timeline_text()),
-                        frames, system, SC.FRESH_EYE, model=CLAUDE_GATE, max_tokens=4000)
-    except RuntimeError:
-        _log(wd, "P6 fresh-eye: call failed, kept timeline")
-        return
-    clean = []
-    for seg in r.get("segments", []):
-        if not isinstance(seg, dict):                  # tolerate a stray non-object entry
-            continue
-        a, b = seg.get("start_sec"), seg.get("end_sec")
-        if a is None or b is None:
-            continue
-        try:
-            a, b = float(a), float(b)
-        except (TypeError, ValueError):
-            continue
-        if b - a < 0.05 or a < -0.1 or b > s.duration + 0.5:
-            continue
-        clean.append((max(0.0, a), min(s.duration, b),
-                      str(seg.get("left") or "N/A"), str(seg.get("right") or "N/A")))
-    clean.sort()
-    n0 = len(s.segments)
-    # GUARD: fresh-eye may polish/merge a little, but a real "fix" never collapses the
-    # timeline by half. Reject a catastrophic over-merge (e.g. 24->3, 7->2) and keep the
-    # vetted timeline — this is the mega-segment failure sneaking in via the last step.
-    if len(clean) < 1 or (len(clean) == 1 and s.duration > 6) \
-            or (n0 >= 5 and len(clean) < 0.6 * n0):
-        s.fresh_eye_note = (f"rejected rewrite ({n0} -> {len(clean)} segs; >40% drop or "
-                            f"degenerate) — kept timeline. notes: {str(r.get('notes',''))[:120]}")
-        _log(wd, f"P6 fresh-eye: {s.fresh_eye_note}")
-        return
-    rebuilt = []
-    for (a, b, lft, rgt) in clean:
-        sg = Segment(start=round(a, 2), end=round(b, 2), left=lft, right=rgt)
-        sg.boundary_provenance = "fresh_eye"
-        rebuilt.append(sg)
-    n0 = len(s.segments)
-    s.segments = rebuilt
-    # LOCKED-TRANSITION INVARIANT (fix #1): fresh-eye is the LAST stage and historically
-    # the one that collapsed a correct timeline into a 30s blob by merging across real
-    # pickups (~12.7s, ~27.7s). It may relabel and lightly merge, but it may NEVER erase a
-    # detected place/pickup/throw — re-split any transition it swallowed.
-    n_re = len(s.segments)
-    _enforce_cuts(s, _locked_transitions(s), wd)
-    s.track = derive_track_from_labels(s.segments)
-    restored = len(s.segments) - n_re
-    s.fresh_eye_note = (f"reads_correctly={r.get('reads_correctly')}; {n0} -> "
-                        f"{len(s.segments)} segs"
-                        + (f" (re-split {restored} swallowed transition(s))" if restored else "")
-                        + f". {str(r.get('notes',''))[:160]}")
-    _log(wd, f"P6 fresh-eye: {s.fresh_eye_note}")
 
 
 # =========================================================================== #
@@ -984,8 +646,8 @@ def _repair_seams(video: str, out_path: str, parts: list, merged: dict,
         seam_clip = str(wd / f"seam{i}.mp4")
         _extract_clip(video, a, b - a, seam_clip)
         _log(wd, f"-- seam {i}: re-flow [{a:.1f}-{b:.1f}s] across boundary {seam_t:.1f}s")
-        ep = _annotate_single(seam_clip, str(wd / f"seam{i}.json"),
-                              str(wd / f"seam{i}"), 2, max_attempts, False)
+        ep = _annotate(seam_clip, str(wd / f"seam{i}.json"),
+                       str(wd / f"seam{i}"), max_attempts)
         return (li, ri, _shift(ep.get("segments", []), a))
 
     if jobs:
@@ -1072,23 +734,189 @@ def _lean_label(s, gv, system, wd, feedback=""):
     _log(wd, f"LEAN label -> {len(s.segments)} segments labeled")
 
 
-def _lean_merge(s, wd):
-    """Merge consecutive segments with identical (left,right) labels."""
+def _seg_reconcile(s, gv, system, wd, min_len: float = 1.6) -> bool:
+    """STAGE S+ (split) — per-segment temporal-structure audit (Gemini native, ported from
+    v49). For each span longer than min_len a focused pass over [a,b] decides ONE action or
+    several and returns the onset of each change (esp. a put-down that completes a cycle);
+    the span is split there. Runs on UNLABELED cuts (before labeling), refining only the cut
+    list. Complements the delete-only merge-critic — together they fix granularity BOTH ways
+    (split under-segmented, merge over-segmented). Returns True if the cuts changed."""
+    if not s.segments:
+        return False
+
+    def _one(idx_seg):
+        i, seg = idx_seg
+        if seg.end - seg.start < min_len:
+            return i, []
+        nfr = int(round((seg.end - seg.start) * FPS_SEGMENT))
+        prompt = _p("seg_reconcile.txt", N=nfr, A=round(seg.start, 1), B=round(seg.end, 1),
+                    GOAL=s.goal or "(unknown)",
+                    LEFT=(seg.left if seg.left and seg.left != "N/A" else "(unlabeled)"),
+                    RIGHT=(seg.right if seg.right and seg.right != "N/A" else "(unlabeled)"))
+        r = gv.watch(prompt, system, SC.SEG_RECONCILE, a=seg.start, b=seg.end,
+                     fps=FPS_SEGMENT, max_tokens=1500)      # raises -> _parallel retries
+        cuts = sorted(float(x) for x in r.get("boundaries", [])
+                      if x is not None and seg.start + 0.3 < float(x) < seg.end - 0.3)
+        return i, cuts
+
+    extra = []
+    for r in _parallel(_one, list(enumerate(s.segments)), wd=wd, tag="seg_reconcile"):
+        if r is None:
+            continue
+        _i, cuts = r
+        extra.extend(cuts)
+    if not extra:
+        _log(wd, "seg_reconcile: no splits")
+        return False
+    interior = [seg.end for seg in s.segments[:-1]] + extra
+    bounds = sorted({round(c, 2) for c in interior if 0.3 < c < s.duration - 0.3})
+    n0 = len(s.segments)
+    s.segments = _segs_from_bounds(bounds, s.duration, "seg_reconcile")
+    _log(wd, f"seg_reconcile: +{len(extra)} split point(s) -> {n0} -> {len(s.segments)} segments")
+    return True
+
+
+# --------------------------------------------------------------------------- #
+#  STAGE R — atomic-label contract (deterministic, NO model) + helpers ported  #
+#  from v49: fuzzy same-action merge (token overlap, not a wordlist).          #
+# --------------------------------------------------------------------------- #
+def _norm_lbl(x) -> str:
+    return " ".join(str(x or "N/A").lower().split())
+
+
+def _label_sim(a, b) -> float:
+    """Generic word-overlap (Jaccard) — token overlap, NOT a semantic wordlist."""
+    wa, wb = set(_norm_lbl(a).split()), set(_norm_lbl(b).split())
+    if not wa or not wb:
+        return 1.0 if wa == wb else 0.0
+    return len(wa & wb) / len(wa | wb)
+
+
+def _labels_mergeable(p_l, p_r, s_l, s_r, thresh: float = 0.6) -> bool:
+    """Two adjacent segments merge when BOTH hands read as the SAME action — exact OR
+    near-identical wording (token overlap >= thresh). An idle hand (N/A) must match N/A
+    exactly: idle vs active is never 'similar'."""
+    def one(a, b):
+        na, nb = _norm_lbl(a), _norm_lbl(b)
+        if na == nb:
+            return True
+        if na == "n/a" or nb == "n/a":
+            return False
+        return _label_sim(a, b) >= thresh
+    return one(p_l, s_l) and one(p_r, s_r)
+
+
+_CHAIN_RE = re.compile(r"\b(and|then|while|before|after)\b", re.I)
+
+
+def _atomic_contract(s, wd):
+    """STAGE R (deterministic, no model): (1) fuzzy-merge consecutive segments whose BOTH
+    hands read the SAME action ('thread the nut'+'tighten the nut' -> one), collapsing the
+    micro pick/place cycles of one continuous handling; (2) FLAG any chained-narrative
+    label ('pick up and thread') for the frame verifier to atomise — times untouched, the
+    label rewrite is V's job (it sees the pixels)."""
     if not s.segments:
         return
     merged = [s.segments[0]]
     for seg in s.segments[1:]:
         p = merged[-1]
-        if (p.left, p.right) == (seg.left, seg.right):
+        if _labels_mergeable(p.left, p.right, seg.left, seg.right):
             p.end = seg.end
+            p.draft = {**(p.draft or {}), "merged_run": True}
         else:
             merged.append(seg)
-    if len(merged) != len(s.segments):
-        _log(wd, f"LEAN merge -> {len(s.segments)} -> {len(merged)} segments")
+    n0 = len(s.segments)
     s.segments = merged
+    if n0 != len(merged):
+        _log(wd, f"R atomic-contract: fuzzy-merge {n0} -> {len(merged)} segments")
+    nflag = 0
+    for i, seg in enumerate(s.segments):
+        for hand in ("left", "right"):
+            lab = getattr(seg, hand)
+            if lab and lab.upper() != "N/A" and _CHAIN_RE.search(lab):
+                s.flags.append(Flag(i, "chained_narrative?", "atomic_contract",
+                                    f"{hand} label not atomic: {lab!r} — atomise to one action"))
+                nflag += 1
+    if nflag:
+        _log(wd, f"R atomic-contract: flagged {nflag} chained-narrative label(s)")
 
 
-def _annotate_lean(video, out_path, workdir=None, max_attempts=3, apply_overrides=False):
+def _failing_stage(s, dir_before: str) -> str:
+    """Which stage the verifier (gate) sends the rerun back to. The gate auto-applies its
+    own merges/relabels within its call, and its rerun_feedback is a punch-list for the
+    LABELER — so a rerun is a relabel (cuts kept) by default. The one case that warrants a
+    full re-segment is a DIRECTION FLIP: the whole interpretation changed, so re-derive the
+    cuts (S) then relabel. Returns 'segment' or 'label'."""
+    return "segment" if s.direction != dir_before else "label"
+
+
+# --------------------------------------------------------------------------- #
+#  STAGE W — global consistency audit on a 3rd model family (GPT-5.5), full    #
+#  whole-clip frames with labels overlaid, NO other context.                   #
+# --------------------------------------------------------------------------- #
+def _global_audit_gpt(s, system: str, wd: Path):
+    """FINAL whole-clip pass on GPT-5.5 (3rd family): sees the clip with the assigned L/R
+    labels overlaid and NOTHING else, returns a corrected timeline — catches what windowed
+    opus verify shares-blindspot on (swapped hand roles, reversed destination, N/A on a
+    releasing hand). Same degenerate-over-merge guard as fresh-eye; GPT is advisory-final,
+    never re-graded."""
+    if not s.segments:
+        return
+    frames = render_labeled(s.clocked, s.segments, FPS_FRESH, str(wd),
+                            max_side=720, cap_frames=80)
+    if not frames:
+        return
+    try:
+        r = gpt_call(_p("fresh_eye.txt", TIMELINE=s.timeline_text()),
+                     frames, system, SC.FRESH_EYE, model=GPT_MODEL, max_tokens=12000)
+    except RuntimeError:
+        _log(wd, "W global-audit (gpt): call failed, kept timeline")
+        return
+    clean = []
+    for seg in r.get("segments", []):
+        if not isinstance(seg, dict):
+            continue
+        a, b = seg.get("start_sec"), seg.get("end_sec")
+        try:
+            a, b = float(a), float(b)
+        except (TypeError, ValueError):
+            continue
+        if b - a < 0.05 or a < -0.1 or b > s.duration + 0.5:
+            continue
+        clean.append((max(0.0, a), min(s.duration, b),
+                      str(seg.get("left") or "N/A"), str(seg.get("right") or "N/A")))
+    clean.sort()
+    n0 = len(s.segments)
+    if len(clean) < 1 or (len(clean) == 1 and s.duration > 6) \
+            or (n0 >= 5 and len(clean) < 0.6 * n0):
+        s.fresh_eye_note = (f"W global-audit rejected rewrite ({n0} -> {len(clean)}; "
+                            f">40% drop or degenerate) — kept timeline. "
+                            f"notes: {str(r.get('notes',''))[:120]}")
+        _log(wd, f"W global-audit (gpt): {s.fresh_eye_note}")
+        return
+    rebuilt = []
+    for (a, b, lft, rgt) in clean:
+        sg = Segment(start=round(a, 2), end=round(b, 2), left=lft, right=rgt)
+        sg.boundary_provenance = "global_audit_gpt"
+        rebuilt.append(sg)
+    s.segments = rebuilt
+    s.fresh_eye_note = (f"W global-audit (gpt-5.5): {n0} -> {len(rebuilt)} segs. "
+                        f"notes: {str(r.get('notes',''))[:160]}")
+    _log(wd, f"W global-audit (gpt): {n0} -> {len(rebuilt)} segments | {str(r.get('notes',''))[:90]}")
+
+
+def _annotate(video, out_path, workdir=None, max_attempts=3):
+    """The pipeline for one clip — circle-grounded, no modes. The segment->verify block runs
+    in a keep-best rerun loop (<=max_attempts); the verifier's feedback decides re-entry
+    (relabel by default; full re-segment on a direction flip). Stages:
+      S  segmentation        (pro 10fps)        -> cuts only
+      S+ seg-reconcile       (pro, per long seg)-> split swallowed multi-action cycles
+      A  annotation          (pro 10fps, parallel/seg) -> per-hand labels on fixed spans
+      R  atomic-label contract (deterministic)  -> fuzzy same-action merge + chained flag
+      S2 merge-critic        (opus, frames)     -> delete-only merge of over-split fragments
+      V  verifier            (opus, frames)     -> verdict + corrections + rerun feedback
+    then once on the best attempt:
+      W  global audit        (GPT-5.5, frames)  -> 3rd-family whole-clip corrected timeline."""
     import copy as _copy
     t0 = time.time()
     wd = Path(workdir or f"logs/{Path(video).stem}")
@@ -1096,41 +924,48 @@ def _annotate_lean(video, out_path, workdir=None, max_attempts=3, apply_override
     system = (PROMPTS / "caption.system.txt").read_text()
     s = ClipState(video=video)
     s.duration = probe_duration(video)
-    _log(wd, f"=== annotate LEAN {Path(video).name} ({s.duration:.1f}s) — no 1A/1C ===")
+    _log(wd, f"=== annotate LEAN+ {Path(video).name} ({s.duration:.1f}s) — circle-grounded, no 1A/1C ===")
     s.clocked = str(wd / "clocked.mp4")
     burn_clock(video, s.clocked)
     gv = GeminiVideo(GEMINI_NATIVE)
     gv.upload(s.clocked)
-    _log(wd, "clock burned + video ACTIVE (LEAN)")
+    _log(wd, "clock burned + video ACTIVE (LEAN+)")
 
     phase2_bursts(s, system, wd); _snap(s, "2 bursts", wd)          # for direction only
     phase3_direction(s, gv, system, wd); _snap(s, "3 direction", wd)
-    _log(wd, f"LEAN direction={s.direction} | goal={s.goal}")
+    facts_snaps = list(s.stage_snapshots)
+    _log(wd, f"LEAN+ direction={s.direction} | goal={s.goal}")
 
-    feedback, best = "", None
+    feedback, stage, best = "", "segment", None
     for attempt in range(1, max_attempts + 1):
-        _log(wd, f"=== LEAN ATTEMPT {attempt}/{max_attempts}"
-                + (f" (fb {feedback[:80]!r})" if feedback else "") + " ===")
-        s.flags, s.ran, s.stage_snapshots = [], set(), []
-        _lean_segment(s, gv, system, wd); _snap(s, "4 lean segment", wd)
-        _lean_label(s, gv, system, wd, feedback=feedback if attempt > 1 else "")
-        _snap(s, "4 lean label", wd)
-        _lean_merge(s, wd); _snap(s, "4 lean merge", wd)
-        gate = phase5_gate(s, gv, system, wd); _snap(s, "5 gate", wd)
+        _log(wd, f"=== LEAN+ ATTEMPT {attempt}/{max_attempts} (re-enter @ {stage})"
+                + (f" fb {feedback[:80]!r}" if feedback else "") + " ===")
+        s.flags, s.ran, s.stage_snapshots, s.transitions = [], set(), list(facts_snaps), []
+        if attempt == 1 or stage == "segment":
+            _lean_segment(s, gv, system, wd); _snap(s, "S segment", wd)            # STAGE S
+            _seg_reconcile(s, gv, system, wd); _snap(s, "S+ seg-reconcile", wd)    # STAGE S+ (split)
+        _lean_label(s, gv, system, wd, feedback=feedback if attempt > 1 else "")   # STAGE A
+        _snap(s, "A label", wd)
+        _atomic_contract(s, wd); _snap(s, "R atomic-contract", wd)                 # STAGE R
+        delete_only_critic(s, system, wd); _snap(s, "S2 merge-critic", wd)         # STAGE S2
+        completeness_check(s, gv, system, wd); _snap(s, "PP pick<->place match", wd)  # STAGE PP
+        dir_before = s.direction
+        gate = phase5_gate(s, gv, system, wd); _snap(s, "V verifier", wd)          # STAGE V
         verdict = gate.get("quality_verdict", "good")
         score = (0 if verdict == "good" else 1, -len(s.segments))
         if best is None or score < best[0]:
             best = (score, _copy.deepcopy(s.segments), list(s.stage_snapshots),
                     s.gate_findings, s.purpose_verdict, attempt)
         if verdict == "good" or attempt == max_attempts:
-            _log(wd, f"=== LEAN quality={verdict}; keep attempt {best[5]} ===")
+            _log(wd, f"=== LEAN+ quality={verdict}; keep attempt {best[5]} ===")
             break
+        stage = _failing_stage(s, dir_before)
         feedback = gate.get("rerun_feedback") or "Re-check segment cuts and per-hand (circle) labels."
     s.segments, s.stage_snapshots, s.gate_findings, s.purpose_verdict = best[1], best[2], best[3], best[4]
 
-    fresh_eye(s, system, wd); _snap(s, "6 fresh-eye (final)", wd)
-    episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)
-    _log(wd, f"=== DONE LEAN {time.time()-t0:.0f}s | {len(s.segments)} segments | {USAGE.summary()} ===")
+    _global_audit_gpt(s, system, wd); _snap(s, "W global-audit (gpt-5.5, final)", wd)  # STAGE W
+    episode = QA.export_episode(s, out_path)
+    _log(wd, f"=== DONE {time.time()-t0:.0f}s | {len(s.segments)} segments | {USAGE.summary()} ===")
     return episode
 
 
@@ -1166,20 +1001,18 @@ def _hand_overlay(video: str, workdir: str | None) -> str:
 
 
 def annotate(video: str, out_path: str, workdir: str | None = None,
-             max_passes: int = 2, max_attempts: int = 3,
-             apply_overrides: bool = False, hand_overlay: bool = True,
-             lean: bool = True) -> dict:
-    """Public entry: short videos go straight through; long ones (> CHUNK_SEC * 1.1) are
-    split into even <= CHUNK_SEC parts, each annotated independently, merged, then each seam
-    is re-segmented across the boundary so straddling actions flow.
-    lean=True uses the circle-grounded v49-style segment+label path (skips 1A/1C)."""
-    if hand_overlay:
-        video = _hand_overlay(video, workdir)            # burn L/R hand circles -> all stages see them
-    _single = _annotate_lean if lean else _annotate_single
-    _single_args = (max_attempts, apply_overrides) if lean else (max_passes, max_attempts, apply_overrides)
+             max_attempts: int = 3) -> dict:
+    """Public entry — ONE pipeline, no modes/flags:
+      raw video -> YOLO L/R-circle overlay -> clock burn -> bursts + direction
+      -> [ S segment -> S+ seg-reconcile -> A label -> R atomic-contract -> S2 merge-critic
+           -> V verify ] looped <=max_attempts (keep best; verifier feedback picks re-entry)
+      -> W global audit (GPT-5.5) -> export_episode.
+    Long clips (> CHUNK_SEC) are split into even <= CHUNK_SEC parts, each run through the
+    SAME pipeline in parallel, then merged and every seam re-flowed across the boundary."""
+    video = _hand_overlay(video, workdir)                # burn L/R circles -> all stages see them
     dur = probe_duration(video)
-    if dur <= CHUNK_SEC * 1.1:
-        return _single(video, out_path, workdir, *_single_args)
+    if dur <= CHUNK_SEC:                                 # <=5min: one pass; longer -> split
+        return _annotate(video, out_path, workdir, max_attempts)
 
     wd = Path(workdir or f"logs/{Path(video).stem}")
     wd.mkdir(parents=True, exist_ok=True)
@@ -1198,8 +1031,8 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
 
     def _do_part(spec):
         i, a, pv, _plen = spec
-        ep = _single(pv, str(wd / f"part{i + 1}.json"),
-                     str(wd / f"part{i + 1}"), *_single_args)
+        ep = _annotate(pv, str(wd / f"part{i + 1}.json"),
+                       str(wd / f"part{i + 1}"), max_attempts)
         return (a, ep)
 
     _log(wd, f"-- annotating {n} parts IN PARALLEL")
@@ -1216,127 +1049,3 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
     return merged
 
 
-def _annotate_single(video: str, out_path: str, workdir: str | None = None,
-                     max_passes: int = 2, max_attempts: int = 3,
-                     apply_overrides: bool = False) -> dict:
-    t0 = time.time()
-    wd = Path(workdir or f"logs/{Path(video).stem}")
-    wd.mkdir(parents=True, exist_ok=True)
-    system = (PROMPTS / "caption.system.txt").read_text()
-
-    s = ClipState(video=video)
-    s.duration = probe_duration(video)
-    _log(wd, f"=== annotate {Path(video).name} ({s.duration:.1f}s) ===")
-
-    s.clocked = str(wd / "clocked.mp4")
-    burn_clock(video, s.clocked)
-    _log(wd, "clock burned (audio off) -> upload to Gemini File API")
-
-    gv = GeminiVideo(GEMINI_NATIVE)              # gemini-3.1-pro: facts + native label
-    gv.upload(s.clocked)
-    gframes_pro = GeminiFrames(GEMINI_NATIVE)    # pro frames: template_match (text only)
-    _log(wd, "video ACTIVE")                     # bursts/edge/gate = Claude opus (no flash)
-
-    # ============================================================================ #
-    #  ONE TIMELINE, refined step by step. Facts computed once; the dense 0.1s      #
-    #  facts ARE the starting timeline; each stage rewrites it in place.            #
-    # ============================================================================ #
-    # INVARIANT: every stage emits the full timeline (via _snap), even if unchanged — so
-    # each stage is a guaranteed timeline output, one row in the trace.
-    phase1_contact(s, gv, system, wd)                 # STEP 1A: objects + per-0.1s contact
-    _seed_timeline(s)                                 # the dense facts ARE the timeline
-    _snap(s, "1A seed (0.1s contact facts)", wd)
-    phase1_transitions(s, system, wd)                 # STEP 1C: transitions annotate it
-    _snap(s, "1C transitions (annotate)", wd)
-    phase2_bursts(s, system, wd)                      # STEP 2: rotation bursts
-    _snap(s, "2 bursts (annotate)", wd)
-    phase3_direction(s, gv, system, wd)               # STEP 3: direction + goal
-    _snap(s, "3 direction (annotate)", wd)
-    facts_snaps = list(s.stage_snapshots)             # preserved across the per-attempt reset
-    _log(wd, f"facts ready: dir={s.direction}, {len(s.transitions)} transitions")
-
-    # ---- RETRY LOOP over the refinement chain (keep BEST by gate verdict) ----
-    import copy as _copy
-    feedback, best = "", None
-    for attempt in range(1, max_attempts + 1):
-        _log(wd, f"=== ATTEMPT {attempt}/{max_attempts}"
-                + (f" (feedback: {feedback[:90]!r})" if feedback else "") + " ===")
-        if attempt > 1 and feedback:
-            phase1_transitions(s, system, wd, hint=feedback)   # focused re-scan
-        s.flags, s.ran, s.stage_snapshots = [], set(), list(facts_snaps)
-        # the gate's detailed punch-list flows straight into the labeler on a rerun, so the
-        # next attempt FIXES the named defects rather than regenerating the same labels
-        label_and_collapse(s, gv, system, wd,
-                           feedback=feedback if attempt > 1 else "")  # STEP 4
-        _snap(s, "4 label + collapse", wd)
-        refine_timeline(s, system, wd)                # STEP 5: verifier (model edit)
-        _snap(s, "5 verifier (consistency edit)", wd)
-        rep, afl = AN.analyze(s)                      # STEP 6: code analysis — READ ONLY
-        s.analysis_report = rep
-        s.flags.extend(afl)
-        _snap(s, "6 code-analysis (read-only, re-emit)", wd)
-        _log(wd, f"6 code-analysis: +{len(afl)} advisory flags (no timeline change)")
-        gate = phase5_gate(s, gv, system, wd)         # STEP 7: gate + QA (model edit)
-        _snap(s, "7 gate + QA (model edit)", wd)
-        verdict = gate.get("quality_verdict", "good")
-        # Score (lower=better): gate-good, then fewest HARD flags (contradictions of the
-        # reliable 1A contact — N/A on a gripping hand, object the hand never touched),
-        # then fewest soft flags, then MORE segments. The hard term ranks the attempt most
-        # consistent with the contact facts ABOVE a raw flag-count (which misranked the
-        # thread/N-A timeline above the correct thread/pickup one on e333dda6).
-        _HARD = {"idle_but_holding?", "contact_says_idle?", "object_unsupported?",
-                 "frozen_across_transition?", "dup_across_transition?"}
-        hard = sum(1 for f in s.flags if f.type in _HARD)
-        soft = len(s.flags) - hard
-        # Tiebreaker BOUNDED BY the detected transitions (fix: stop rewarding fragmentation).
-        # The locked transitions imply ~expected segments; prefer the attempt whose count is
-        # CLOSEST to that target, so a 28-seg over-cut can NEVER beat the correct 7-seg one
-        # (the old `-len(segments)` term did exactly the wrong thing). With NO transitions
-        # detected we have no count signal -> fall back to "more is better".
-        locked = _locked_transitions(s)
-        expected = len(locked) + 1
-        seg_term = abs(len(s.segments) - expected) if locked else -len(s.segments)
-        score = (0 if verdict == "good" else 1, hard, soft, seg_term)
-        if best is None or score < best[0]:
-            best = (score, _copy.deepcopy(s.segments), list(s.flags),
-                    _copy.deepcopy(s.track), attempt, list(s.stage_snapshots),
-                    s.analysis_report, s.gate_findings, s.purpose_verdict)
-        # CAP GRANULARITY: once every detected transition is already covered (count at or past
-        # the transition-implied target + slack), a further needs_rerun can only fragment —
-        # there is nothing real left to split. Stop and keep the best instead of chasing the
-        # gate's complaint into the 7->28 escalation.
-        capped = bool(locked) and attempt >= 2 and len(s.segments) > expected + 2
-        if verdict == "good" or attempt == max_attempts or capped:
-            why = "good" if verdict == "good" else ("granularity-capped" if capped else verdict)
-            _log(wd, f"=== quality={why} after attempt {attempt}; "
-                    f"best=attempt {best[4]} (score {best[0]}) -> accept ===")
-            break
-        feedback = (gate.get("rerun_feedback") or
-                    "Re-check for missed place/pickup/throw boundaries.")
-    # restore the best attempt
-    (s.segments, s.flags, s.track, _, s.stage_snapshots,
-     s.analysis_report, s.gate_findings, s.purpose_verdict) = best[1:]
-
-    # ---- STEP 8: fresh-eye final review (context-free), once on the best ----
-    # fresh-eye runs AFTER the gate, so its output is never re-graded. Guard it: if it
-    # INTRODUCES a structural defect (an identical-label pair straddling a transition, or a
-    # hand frozen across its own transition — the exact failures the strict gate rejects),
-    # revert to the vetted pre-fresh-eye timeline. Fresh-eye may improve, never regress.
-    _STRUCT8 = {"frozen_across_transition?", "dup_across_transition?"}
-    _pre_segs = _copy.deepcopy(s.segments)
-    _pre_track = _copy.deepcopy(s.track)
-    _pre_bad = sum(1 for f in AN.analyze(s)[1] if f.type in _STRUCT8)
-    fresh_eye(s, system, wd)
-    _post_bad = sum(1 for f in AN.analyze(s)[1] if f.type in _STRUCT8)
-    if _post_bad > _pre_bad:
-        _log(wd, f"P6 fresh-eye introduced {_post_bad - _pre_bad} structural defect(s) "
-                f"({_pre_bad}->{_post_bad}) -> REVERT to pre-fresh-eye timeline")
-        s.segments, s.track = _pre_segs, _pre_track
-        s.fresh_eye_note = (s.fresh_eye_note + " | REVERTED (introduced structural defect)").strip()
-    _snap(s, "8 fresh-eye (final, exported)", wd)
-
-    episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)
-    _log(wd, f"=== DONE {time.time()-t0:.0f}s | {len(s.segments)} segments, "
-            f"{len(episode['_qa']['violations'])} qa flags | usage: {USAGE.summary()} ===")
-    _log(wd, f"episode -> {out_path}")
-    return episode
