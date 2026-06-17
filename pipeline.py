@@ -978,16 +978,20 @@ def _hand_overlay(video: str, workdir: str | None) -> str:
     wd.mkdir(parents=True, exist_ok=True)
     indir, outdir = wd / "_ov_in", wd / "_ov_out"
     indir.mkdir(exist_ok=True); outdir.mkdir(exist_ok=True)
-    link = indir / Path(video).name
+    # lowercase .mp4 symlink: detect_hands.py globs *.mp4 case-sensitively, so an uppercase
+    # .MP4 source would be silently skipped (overlay no-op -> no L/R circles). Force .mp4.
+    link = indir / (Path(video).stem + ".mp4")
     try:
         if link.is_symlink() or link.exists():
             link.unlink()
         link.symlink_to(Path(video).resolve())          # isolate one video for --videos-dir
+        # 10fps output (no --native-fps): every stage samples <=10fps, so native 30fps redraw
+        # is wasted work — 10fps overlay is ~3x faster with identical L/R grounding.
         cmd = [sys.executable, str(_YOLO / "detect_hands.py"),
                "--handpose", "--model", str(_HAND_MODEL),
                "--shape", "circle", "--circle-expand", "60", "--dim", "0.6",
                "--detect-mult", "1", "--hold-sec", "0", "--radius-cap", "0.15",
-               "--native-fps", "--fps", "10", "--workers", "1",
+               "--fps", "10", "--workers", "1",
                "--videos-dir", str(indir), "--out-dir", str(outdir)]
         r = subprocess.run(cmd, capture_output=True, text=True)
         produced = outdir / f"{Path(video).stem}_hands.mp4"

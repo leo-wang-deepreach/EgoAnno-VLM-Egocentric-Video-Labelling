@@ -53,3 +53,8 @@ factsfirst_manifest.json
 
 # local batch launcher (hardcodes private test-video paths)
 run_batch30.sh
+
+# Videos-Leo batch (private vendor footage)
+Videos-Leo/
+Videos-Leo-PROGRESS.md
+leo_batch.py
