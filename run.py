@@ -25,14 +25,14 @@ def main():
                     help="apply out/overrides/<id>.yaml at export (OFF for honest eval)")
     ap.add_argument("--no-hand-overlay", action="store_true",
                     help="disable the YOLO green=L/blue=R hand-circle overlay pre-step")
-    ap.add_argument("--lean", action="store_true",
-                    help="lean flow: skip 1A/1C, direction+burst then v49-style segment+label on the circled video")
+    ap.add_argument("--facts-first", action="store_true",
+                    help="use the legacy facts-first flow (1A/1C-seeded); DEFAULT is the lean circle-grounded flow")
     args = ap.parse_args()
 
     ep = annotate(args.video, args.out, workdir=args.workdir,
                   max_passes=args.passes, max_attempts=args.attempts,
                   apply_overrides=args.apply_overrides,
-                  hand_overlay=not args.no_hand_overlay, lean=args.lean)
+                  hand_overlay=not args.no_hand_overlay, lean=not args.facts_first)
     print(f"\nclip={ep['clip']} direction={ep['direction']} "
           f"segments={len(ep['segments'])} qa={len(ep['_qa']['violations'])}")
     print(f"goal: {ep['goal']}")

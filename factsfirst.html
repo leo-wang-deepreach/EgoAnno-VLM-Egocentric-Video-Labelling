@@ -72,6 +72,7 @@
   <span class="pill">dur <b id="dur">—</b></span>
   <span class="pill" id="qpill">qa <b id="nqa">—</b></span>
   <span class="pill" id="gpill">gate <b id="gv">—</b></span>
+  <span class="pill" id="fpill">flow <b id="flow">—</b></span>
 </header>
 
 <div class="wrap">
@@ -142,6 +143,9 @@ async function loadClip(c){
   const qn=(EP._qa&&EP._qa.violations?EP._qa.violations.length:(EP._qa||[]).length);
   $('#nqa').textContent=qn; $('#qpill').className='pill'+(qn?' bad':' good');
   $('#gv').textContent=EP._gate_quality||EP._purpose_verdict||'—';
+  const lean=!(EP._contact_frames&&EP._contact_frames.length);
+  $('#flow').textContent=lean?'lean (default)':'facts-first';
+  $('#fpill').className='pill'+(lean?' good':'');
   $('#goal').innerHTML='<b>Goal:</b> '+esc(EP.goal||'');
   const v=$('#vid'); v.src=c.video; v.load();
   buildTimeline(); buildPanels();
@@ -172,7 +176,7 @@ const STEPMETA={
  '1c':{fps:'30 fps',inp:'sliding 3.5s windows — PIXELS (opus)',out:'place/pickup/handoff events'},
  '2' :{fps:'30 fps',inp:'short burst windows — PIXELS (opus)',out:'rotation/role/colour verdicts'},
  '3' :{fps:'10 fps',inp:'whole clip + objects + track + bursts',out:'direction + derived goal'},
- '4' :{fps:'10 fps',inp:'segment: track+transitions(hints)+goal · label: per-seg window + contact facts',out:'segments + per-hand labels'},
+ '4' :{fps:'10 fps',inp:'segment: video + goal + burst verdicts (+track/transition hints in facts-first) · label: per-seg window + L/R circles + neighbours',out:'segments + per-hand labels'},
  '4d':{fps:'TEXT only',inp:'label timeline + track (NO video)',out:'verifier flags'},
  '4e':{fps:'CODE only',inp:'track / labels / transitions',out:'advisory analysis + flags'},
  '5' :{fps:'2 fps',inp:'whole-clip frames + timeline + flags + analysis (opus)',out:'corrections + quality verdict'},
@@ -242,15 +246,28 @@ function buildPanels(){
   // STAGE TRACE (open) — watch the timeline evolve, spot the step that broke it
   html+=sect('▶ Stage trace — timeline after each step (find the bad step)',
     stages.length+' stages', traceHtml, true);
-  // STEP 1a — objects + contact track (ground truth)
-  html+=sect('Step 1a · objects + contact track (ground truth)',
-    objs.length+' objects · '+cf.length+' frames',
-    `<div class="kv"><b>objects:</b> ${objs.map(o=>`<span class="chip">${esc(o.name)}${o.colour?' ('+esc(o.colour)+')':''}</span>`).join('')}</div>
-     <div style="margin-top:8px"><b class="kv">per-frame facts (fg / bg / contact — ALL ${cf.length} frames):</b>${cfTbl}</div>
-     <div style="margin-top:8px"><b class="kv">possession (RAW 1A objects, no actions):</b>${trackTbl(EP._contact_track||tr)}</div>`);
-  // STEP 1c — transitions
-  html+=sect('Step 1c · transitions (place/pickup/handoff)',trans.length+' events',
-    trans.length?'<table>'+trans.map(e=>`<tr><td class="t">${f1(e.t)}</td><td>${esc(e.hand)} · <b>${esc(e.kind)}</b> · ${esc(e.object||'')}</td></tr>`).join('')+'</table>':'<div class="empty">none detected</div>');
+  const LEAN=!cf.length;
+  if(LEAN){
+    // lean is the DEFAULT flow — 1A/1C don't run
+    html+=sect('Steps 1a + 1c · skipped (lean flow — default)','direction+burst → segment+label',
+      `<div class="kv">Lean flow is the <b>default</b>. The 1A per-frame contact track and 1C transition scan are <b>skipped</b>:
+       <ul style="margin:6px 0 0 16px;padding:0">
+       <li>Left/right identity comes straight from the burned <b style="color:var(--L)">green</b> (L) / <b style="color:var(--R)">blue</b> (R) circles.</li>
+       <li>Objects are named plainly by the labeler per segment — no upfront catalogue.</li>
+       <li>Segmentation reads the video directly (goal + burst verdicts only, no track/transition hints).</li>
+       </ul>
+       Pass <code>--facts-first</code> to use the legacy 1A/1C-seeded path.</div>`);
+  } else {
+    // STEP 1a — objects + contact track (ground truth)
+    html+=sect('Step 1a · objects + contact track (ground truth)',
+      objs.length+' objects · '+cf.length+' frames',
+      `<div class="kv"><b>objects:</b> ${objs.map(o=>`<span class="chip">${esc(o.name)}${o.colour?' ('+esc(o.colour)+')':''}</span>`).join('')}</div>
+       <div style="margin-top:8px"><b class="kv">per-frame facts (fg / bg / contact — ALL ${cf.length} frames):</b>${cfTbl}</div>
+       <div style="margin-top:8px"><b class="kv">possession (RAW 1A objects, no actions):</b>${trackTbl(EP._contact_track||tr)}</div>`);
+    // STEP 1c — transitions
+    html+=sect('Step 1c · transitions (place/pickup/handoff)',trans.length+' events',
+      trans.length?'<table>'+trans.map(e=>`<tr><td class="t">${f1(e.t)}</td><td>${esc(e.hand)} · <b>${esc(e.kind)}</b> · ${esc(e.object||'')}</td></tr>`).join('')+'</table>':'<div class="empty">none detected</div>');
+  }
   // STEP 2 — rotation bursts
   html+=sect('Step 2 · rotation bursts + reduce','claude opus · deterministic reduce',
     `<div class="kv">summary: ${Object.entries(bs).map(([k,v])=>`<span class="chip">${esc(k)}=${esc(JSON.stringify(v))}</span>`).join('')||'<span class=empty>none</span>'}</div>

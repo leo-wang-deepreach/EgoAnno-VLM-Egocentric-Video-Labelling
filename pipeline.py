@@ -1168,7 +1168,7 @@ def _hand_overlay(video: str, workdir: str | None) -> str:
 def annotate(video: str, out_path: str, workdir: str | None = None,
              max_passes: int = 2, max_attempts: int = 3,
              apply_overrides: bool = False, hand_overlay: bool = True,
-             lean: bool = False) -> dict:
+             lean: bool = True) -> dict:
     """Public entry: short videos go straight through; long ones (> CHUNK_SEC * 1.1) are
     split into even <= CHUNK_SEC parts, each annotated independently, merged, then each seam
     is re-segmented across the boundary so straddling actions flow.
