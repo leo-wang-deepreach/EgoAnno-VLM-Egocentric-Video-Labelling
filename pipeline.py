@@ -734,7 +734,7 @@ def _lean_label(s, gv, system, wd, feedback=""):
     _log(wd, f"LEAN label -> {len(s.segments)} segments labeled")
 
 
-def _seg_reconcile(s, gv, system, wd, min_len: float = 1.6) -> bool:
+def _seg_reconcile(s, gv, system, wd, min_len: float = 3.0) -> bool:
     """STAGE S+ (split) — per-segment temporal-structure audit (Gemini native, ported from
     v49). For each span longer than min_len a focused pass over [a,b] decides ONE action or
     several and returns the onset of each change (esp. a put-down that completes a cycle);
@@ -905,7 +905,7 @@ def _global_audit_gpt(s, system: str, wd: Path):
     _log(wd, f"W global-audit (gpt): {n0} -> {len(rebuilt)} segments | {str(r.get('notes',''))[:90]}")
 
 
-def _annotate(video, out_path, workdir=None, max_attempts=3):
+def _annotate(video, out_path, workdir=None, max_attempts=2):
     """The pipeline for one clip — circle-grounded, no modes. The segment->verify block runs
     in a keep-best rerun loop (<=max_attempts); the verifier's feedback decides re-entry
     (relabel by default; full re-segment on a direction flip). Stages:
@@ -1001,7 +1001,7 @@ def _hand_overlay(video: str, workdir: str | None) -> str:
 
 
 def annotate(video: str, out_path: str, workdir: str | None = None,
-             max_attempts: int = 3) -> dict:
+             max_attempts: int = 2) -> dict:
     """Public entry — ONE pipeline, no modes/flags:
       raw video -> YOLO L/R-circle overlay -> clock burn -> bursts + direction
       -> [ S segment -> S+ seg-reconcile -> A label -> R atomic-contract -> S2 merge-critic
