@@ -990,10 +990,13 @@ def _hand_overlay(video: str, workdir: str | None) -> str:
         # is wasted work — 10fps overlay is ~3x faster with identical L/R grounding.
         cmd = [sys.executable, str(_YOLO / "detect_hands.py"),
                "--handpose", "--model", str(_HAND_MODEL),
-               "--shape", "circle", "--circle-expand", "60", "--dim", "0.6",
+               "--shape", "circle", "--circle-expand", "60", "--dim", "1.0",
                "--detect-mult", "1", "--hold-sec", "0", "--radius-cap", "0.15",
                "--fps", "10", "--workers", "1",
                "--videos-dir", str(indir), "--out-dir", str(outdir)]
+        # --dim 1.0 (no spotlight): the per-frame full-res dimming blend was the overlay
+        # bottleneck (45s->18s on a 15s clip). Circles still ground L/R; the VLM never used
+        # the dimming. Big win on long videos under GPU contention.
         r = subprocess.run(cmd, capture_output=True, text=True)
         produced = outdir / f"{Path(video).stem}_hands.mp4"
         if r.returncode == 0 and produced.exists():
