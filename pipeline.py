@@ -1010,6 +1010,130 @@ _YOLO = HERE.parent / "yolo_hands"
 _HAND_MODEL = _YOLO / "yolo_bundle" / "hand_yolo_detector@20260314.pt"
 
 
+# ===================== LEAN flow (v49-style, circle-grounded) ==================
+# Skip 1A/1C: no facts seed. Direction from video+bursts, then a v49-style
+# segment+label pass directly on the CIRCLED video (L/R from the circles), iterated
+# against the gate. Isolated from the facts-first path so that one is unaffected.
+def _segs_from_bounds(bounds, dur, prov):
+    cuts = sorted(set(round(x, 2) for x in bounds if 0.2 < x < dur - 0.2))
+    pts = [0.0] + cuts + [round(dur, 2)]
+    kept = [pts[0]]
+    for t in pts[1:-1]:
+        if t - kept[-1] >= MIN_SEG:
+            kept.append(t)
+    kept.append(pts[-1])
+    if len(kept) >= 3 and kept[-1] - kept[-2] < MIN_SEG:
+        kept.pop(-2)
+    out = [Segment(start=a, end=b, boundary_provenance=prov, confidence=0.6)
+           for a, b in _spans(kept)]
+    return out or [Segment(start=0.0, end=dur)]
+
+
+def _lean_segment(s, gv, system, wd):
+    r = gv.watch(_p("segment_lean.txt", A=0.0, B=round(s.duration, 1),
+                    GOAL=s.goal or "(unknown)",
+                    BURSTS="\n".join(s.bursts_reduced) or "(none)"),
+                 system, SC.V49_SEGMENT, a=0.0, b=s.duration, fps=FPS_SEGMENT, max_tokens=4000)
+    cuts = sorted(float(x) for x in r.get("boundaries", [])
+                  if x is not None and 0.3 < float(x) < s.duration - 0.3)
+    s.segments = _segs_from_bounds(cuts, s.duration, "lean_segment")
+    _log(wd, f"LEAN segment -> {len(s.segments)} segments ({len(cuts)} cuts)")
+
+
+def _lean_label(s, gv, system, wd, feedback=""):
+    def _one(i):
+        seg = s.segments[i]
+        oa, ob = max(0.0, seg.start - LABEL_CTX), min(s.duration, seg.end + LABEL_CTX)
+        prev = s.segments[i - 1] if i > 0 else None
+        nxt = s.segments[i + 1] if i + 1 < len(s.segments) else None
+        prompt = _p("label_lean.txt", OA=round(oa, 1), OB=round(ob, 1),
+                    A=round(seg.start, 1), B=round(seg.end, 1),
+                    GOAL=s.goal or "(unknown)", DIRECTION=s.direction or "(unknown)",
+                    INVENTORY=s.objects_line() or "(name objects plainly as you see them)",
+                    BURSTS="\n".join(s.bursts_in(seg.start, seg.end)) or "(none in window)",
+                    PREV_LEFT=(prev.left if prev else "(start)"),
+                    PREV_RIGHT=(prev.right if prev else "(start)"),
+                    NEXT_LEFT=(nxt.left if nxt else "(end)"),
+                    NEXT_RIGHT=(nxt.right if nxt else "(end)"))
+        if feedback:
+            prompt += f"\n\nReviewer feedback to address this pass: {feedback}"
+        out = gv.watch(prompt, system, SC.VIDEO_LABEL_NATIVE, a=oa, b=ob,
+                       fps=FPS_LABEL, max_tokens=2000)
+        return i, out
+    for r in _parallel(_one, list(range(len(s.segments))), wd=wd, tag="LEAN label"):
+        if not r:
+            continue
+        i, out = r
+        seg = s.segments[i]
+        seg.left = out.get("left", "N/A") or "N/A"
+        seg.right = out.get("right", "N/A") or "N/A"
+        seg.draft = {"labeled": True, "label_think": out.get("think", ""),
+                     "origin": "lean_label", "label": {"left": seg.left, "right": seg.right}}
+    _log(wd, f"LEAN label -> {len(s.segments)} segments labeled")
+
+
+def _lean_merge(s, wd):
+    """Merge consecutive segments with identical (left,right) labels."""
+    if not s.segments:
+        return
+    merged = [s.segments[0]]
+    for seg in s.segments[1:]:
+        p = merged[-1]
+        if (p.left, p.right) == (seg.left, seg.right):
+            p.end = seg.end
+        else:
+            merged.append(seg)
+    if len(merged) != len(s.segments):
+        _log(wd, f"LEAN merge -> {len(s.segments)} -> {len(merged)} segments")
+    s.segments = merged
+
+
+def _annotate_lean(video, out_path, workdir=None, max_attempts=3, apply_overrides=False):
+    import copy as _copy
+    t0 = time.time()
+    wd = Path(workdir or f"logs/{Path(video).stem}")
+    wd.mkdir(parents=True, exist_ok=True)
+    system = (PROMPTS / "caption.system.txt").read_text()
+    s = ClipState(video=video)
+    s.duration = probe_duration(video)
+    _log(wd, f"=== annotate LEAN {Path(video).name} ({s.duration:.1f}s) — no 1A/1C ===")
+    s.clocked = str(wd / "clocked.mp4")
+    burn_clock(video, s.clocked)
+    gv = GeminiVideo(GEMINI_NATIVE)
+    gv.upload(s.clocked)
+    _log(wd, "clock burned + video ACTIVE (LEAN)")
+
+    phase2_bursts(s, system, wd); _snap(s, "2 bursts", wd)          # for direction only
+    phase3_direction(s, gv, system, wd); _snap(s, "3 direction", wd)
+    _log(wd, f"LEAN direction={s.direction} | goal={s.goal}")
+
+    feedback, best = "", None
+    for attempt in range(1, max_attempts + 1):
+        _log(wd, f"=== LEAN ATTEMPT {attempt}/{max_attempts}"
+                + (f" (fb {feedback[:80]!r})" if feedback else "") + " ===")
+        s.flags, s.ran, s.stage_snapshots = [], set(), []
+        _lean_segment(s, gv, system, wd); _snap(s, "4 lean segment", wd)
+        _lean_label(s, gv, system, wd, feedback=feedback if attempt > 1 else "")
+        _snap(s, "4 lean label", wd)
+        _lean_merge(s, wd); _snap(s, "4 lean merge", wd)
+        gate = phase5_gate(s, gv, system, wd); _snap(s, "5 gate", wd)
+        verdict = gate.get("quality_verdict", "good")
+        score = (0 if verdict == "good" else 1, -len(s.segments))
+        if best is None or score < best[0]:
+            best = (score, _copy.deepcopy(s.segments), list(s.stage_snapshots),
+                    s.gate_findings, s.purpose_verdict, attempt)
+        if verdict == "good" or attempt == max_attempts:
+            _log(wd, f"=== LEAN quality={verdict}; keep attempt {best[5]} ===")
+            break
+        feedback = gate.get("rerun_feedback") or "Re-check segment cuts and per-hand (circle) labels."
+    s.segments, s.stage_snapshots, s.gate_findings, s.purpose_verdict = best[1], best[2], best[3], best[4]
+
+    fresh_eye(s, system, wd); _snap(s, "6 fresh-eye (final)", wd)
+    episode = QA.export_episode(s, out_path, apply_overrides=apply_overrides)
+    _log(wd, f"=== DONE LEAN {time.time()-t0:.0f}s | {len(s.segments)} segments | {USAGE.summary()} ===")
+    return episode
+
+
 def _hand_overlay(video: str, workdir: str | None) -> str:
     """Pre-step: burn GREEN=LEFT / BLUE=RIGHT hand circles (slight spotlight) into the
     raw video at SOURCE fps via the yolo_hands handpose model, so the clocked working
@@ -1043,15 +1167,19 @@ def _hand_overlay(video: str, workdir: str | None) -> str:
 
 def annotate(video: str, out_path: str, workdir: str | None = None,
              max_passes: int = 2, max_attempts: int = 3,
-             apply_overrides: bool = False, hand_overlay: bool = True) -> dict:
+             apply_overrides: bool = False, hand_overlay: bool = True,
+             lean: bool = False) -> dict:
     """Public entry: short videos go straight through; long ones (> CHUNK_SEC * 1.1) are
     split into even <= CHUNK_SEC parts, each annotated independently, merged, then each seam
-    is re-segmented across the boundary so straddling actions flow."""
+    is re-segmented across the boundary so straddling actions flow.
+    lean=True uses the circle-grounded v49-style segment+label path (skips 1A/1C)."""
     if hand_overlay:
         video = _hand_overlay(video, workdir)            # burn L/R hand circles -> all stages see them
+    _single = _annotate_lean if lean else _annotate_single
+    _single_args = (max_attempts, apply_overrides) if lean else (max_passes, max_attempts, apply_overrides)
     dur = probe_duration(video)
     if dur <= CHUNK_SEC * 1.1:
-        return _annotate_single(video, out_path, workdir, max_passes, max_attempts, apply_overrides)
+        return _single(video, out_path, workdir, *_single_args)
 
     wd = Path(workdir or f"logs/{Path(video).stem}")
     wd.mkdir(parents=True, exist_ok=True)
@@ -1070,8 +1198,8 @@ def annotate(video: str, out_path: str, workdir: str | None = None,
 
     def _do_part(spec):
         i, a, pv, _plen = spec
-        ep = _annotate_single(pv, str(wd / f"part{i + 1}.json"),
-                              str(wd / f"part{i + 1}"), max_passes, max_attempts, apply_overrides)
+        ep = _single(pv, str(wd / f"part{i + 1}.json"),
+                     str(wd / f"part{i + 1}"), *_single_args)
         return (a, ep)
 
     _log(wd, f"-- annotating {n} parts IN PARALLEL")

@@ -1,0 +1,40 @@
+You label BOTH hands for ONE segment of an egocentric two-handed manipulation clip, for robot learning. Apply the named disciplines from your system prompt (ACTING vs SUPPORTING, MIXED-IS-TERMINAL, STILL-NOT-HOLD, COMPLETE-THE-ACTION) — they are not restated here. The one discipline that is OVERRIDDEN here: hand identity does NOT come from forearm side — it comes from the coloured circles (below).
+
+=== HAND IDENTITY — READ IT FROM THE CIRCLES ===
+Each hand has a coloured circle burned into the video: the GREEN circle is the LEFT hand, the BLUE circle is the RIGHT hand. Decide which hand is which ONLY from its circle colour — never from position, forearm side, or guessing. Track each hand by its circle even when the hands cross or overlap. A hand with no circle in a frame is out of frame / not detected.
+
+=== WHAT YOU SEE ===
+You watch this clip from t=<<OA>>s to t=<<OB>>s at 10 fps (top-right clock = absolute seconds, the time authority). The CORE segment you must label is t=<<A>>s to t=<<B>>s. The moments before <<A>> and after <<B>> are CONTEXT ONLY — use them to tell whether the core action is a fresh start or the continuation/tail of a neighbor, but DO NOT label them. Your labels describe ONLY what happens in the core [<<A>>, <<B>>].
+
+Task goal (derived upstream, a hypothesis): <<GOAL>>
+Decided direction (settled upstream — your labels must be consistent with it): <<DIRECTION>>
+Objects seen so far (reuse a name when it is the same object; add a new plain name if you see something new): <<INVENTORY>>
+Decisive rotation/role/colour verdicts inside the core (reliable for those moments): <<BURSTS>>
+Previous segment's label (continuity, TEXT only): L: <<PREV_LEFT>> | R: <<PREV_RIGHT>>
+Next segment's label (continuity, TEXT only):     L: <<NEXT_LEFT>> | R: <<NEXT_RIGHT>>
+
+=== STEPS ===
+1. GREEN (LEFT) hand only across the core frames — what is in its circle, what does it do?
+2. BLUE (RIGHT) hand only across the core frames.
+3. RECONCILE (a transfer needs a giver AND a receiver; one hand may support what the other works).
+4. Run the named checks the system prompt defines.
+
+=== LABEL THE CHANGE, NOT THE BACKGROUND ACTION (most important) ===
+This segment was cut HERE because something changed. Name what each hand actually DOES in this span — the brief defining action WINS over the steady background motion:
+- If a hand RELEASES / throws / drops / sets down / lets go of an object anywhere in this span, that hand's label is a PLACE or RELEASE ("place the <object>", "drop the <object>") — NEVER "hold", and never the ongoing "twist/thread". A grip that opens is a place, full stop.
+- If a hand CLOSES on a new object (empty, then gripping), that hand's label is "pick up the <object>" — not "hold".
+- Identify WHICH hand changed by its circle: the hand whose grip OPENS or CLOSES is the actor of the place/pick — put the action on THAT hand. The other hand gets its own real action or N/A.
+- "hold"/"steady"/"brace" is allowed ONLY for a hand that grips ONE object and keeps it still for the WHOLE span with NO release and NO manipulation. If anything happens to that object, name that instead.
+- JUDGE FROM THE MIDDLE: the action in the MIDDLE of the core [<<A>>, <<B>>] is the truth — name THAT. First/last frames are reference only.
+- TWO PARTS IN A JOIN: when the hands work a join they usually hold DIFFERENT parts — one steadies the base, the other turns/threads/places the OTHER part onto it. Name each hand's ACTUAL part distinctly.
+
+Each non-N/A label: 2-8 words, ONE action head, "<verb> the <object> [short modifier]". No "then/while/and", no pronouns, never "left hand"/"right hand" inside a label.
+
+NAME THE SPECIFIC ACTION — vague verbs are BANNED. Never use "manipulate", "handle", "work", "interact with", "use", "adjust", "do something to". State the actual visible motion: hold/steady/brace, thread/screw/twist/turn/tighten/loosen/unscrew, insert/seat, pick up/grab/lift, place/set down/drop/release, push/pull, hand off. The verb must be consistent with the decided direction (assembly → joining verbs; disassembly → separating verbs). If you genuinely cannot tell which motion, pick the most specific one the frames support — never a vague verb.
+
+N/A IS EXPECTED, not a fallback: a hand is N/A when its circle shows it holding/working NOTHING this segment — empty, resting, just reaching, or out of frame. A one-handed place or pickup means the other hand is N/A unless its circle clearly shows it still gripping/steadying something. Do NOT manufacture a "hold" for an idle hand. Decide N/A per hand from what its OWN circle is on — never swap L/R.
+
+OBJECT NAMES: name objects plainly by what you see; do NOT over-specify a component you cannot clearly distinguish (say "black shoe part", not "black shoe upper", unless the part is unmistakable). Spell the same object the same way every segment. When parts are joined, name the one combined unit.
+
+Raw JSON only:
+{"think": "<2-3 sentences: per-hand reading by circle and how you settled the edges>", "left": "<phrase or N/A>", "right": "<phrase or N/A>"}

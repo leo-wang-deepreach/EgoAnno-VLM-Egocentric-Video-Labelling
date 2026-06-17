@@ -167,7 +167,8 @@ function buildTimeline(){
 }
 
 const STEPMETA={
- '1a':{fps:'10 fps',inp:'whole clip, 20s windows — PIXELS',out:'object catalogue + per-frame fg/bg/contact'},
+ '0' :{fps:'source fps',inp:'raw video → handpose YOLO (green=L / blue=R circles, slight spotlight)',out:'overlaid video → clock → seen by EVERY stage'},
+ '1a':{fps:'10 fps',inp:'whole clip, 20s windows — PIXELS w/ L/R circles',out:'object catalogue + per-frame fg/bg/contact (N/A when a hand is empty)'},
  '1c':{fps:'30 fps',inp:'sliding 3.5s windows — PIXELS (opus)',out:'place/pickup/handoff events'},
  '2' :{fps:'30 fps',inp:'short burst windows — PIXELS (opus)',out:'rotation/role/colour verdicts'},
  '3' :{fps:'10 fps',inp:'whole clip + objects + track + bursts',out:'direction + derived goal'},
@@ -235,7 +236,10 @@ function buildPanels(){
   const feSegs=SEGS.filter(s=>s.boundary_provenance==='fresh_eye').length;
 
   let html='';
-  // STAGE TRACE (top, open) — watch the timeline evolve, spot the step that broke it
+  // STEP 0 — hand-circle overlay (v41): the working video every stage sees
+  html+=sect('Step 0 · hand-circle overlay (green=L / blue=R)','burned into the working video',
+    `<div class="kv">The raw clip is first run through the fine-tuned YOLOv8m-pose hand detector; each hand gets a coloured circle burned in — <b style="color:var(--L)">green = LEFT</b>, <b style="color:var(--R)">blue = RIGHT</b> — with a slight spotlight (background still visible). This overlaid video gets the clock and is what EVERY stage below reads, so left/right is <b>visual</b>, not guessed. The player above is showing it.</div>`, false);
+  // STAGE TRACE (open) — watch the timeline evolve, spot the step that broke it
   html+=sect('▶ Stage trace — timeline after each step (find the bad step)',
     stages.length+' stages', traceHtml, true);
   // STEP 1a — objects + contact track (ground truth)
