@@ -58,3 +58,20 @@ run_batch30.sh
 Videos-Leo/
 Videos-Leo-PROGRESS.md
 leo_batch.py
+
+# local build tracker (contains clip-specifics — keep OUT of the public repo)
+todo.md
+
+# ─── perception/ work dir: commit SOURCE (*.py) ONLY ──────────────────────
+# Every data artifact under perception/ carries real clip-IDs and/or object names burned into
+# filenames or pixels (grasp prompts, inventories, grounded review PNGs, depth frames). Source
+# code is clip-agnostic; data is held-out. So: ignore everything under perception/ EXCEPT *.py.
+perception/_*
+perception/*.json
+perception/*.png
+perception/*.jpg
+perception/*.jpeg
+perception/*.npz
+perception/*.npy
+perception/*/
+!perception/*.py
