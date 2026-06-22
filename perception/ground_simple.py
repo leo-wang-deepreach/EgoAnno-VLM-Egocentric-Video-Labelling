@@ -38,6 +38,7 @@ TRUST_THR = float(os.environ.get("TRUST_THR", "0.6"))
 PINCH = float(os.environ.get("PINCH", "0.045"))
 REFS_DIR = os.environ.get("REFS_DIR", "")
 DBG = os.environ.get("DBG", "")
+ZOOM = os.environ.get("ZOOM", "1") != "0"               # STEP 3.5: re-seg the chosen name on a zoomed crop
 COLORS = [(80, 255, 80), (80, 160, 255), (255, 255, 60), (255, 80, 255), (80, 255, 255), (255, 160, 80)]
 _DBGF = None
 
@@ -122,6 +123,26 @@ def _ti_band_score(mk, tp, ip):
         d = ((xs - (ax + tt * vx)) ** 2 + (ys - (ay + tt * vy)) ** 2) ** 0.5
     band = max(10.0, 0.6 * (L2 ** 0.5))                # band radius ~ the pinch aperture
     return float((d <= band).mean())
+
+
+def _split_at_anchor(mask, ax, ay):
+    """Separate two TOUCHING instances: erode to break the thin junction between adjacent objects, keep the
+    connected component containing the anchor, dilate back, intersect with the original for exact boundaries.
+    No-op for a single clean blob (erosion still yields one component) — fixes a held mask that merged the
+    adjacent touching part (two parts touching end-to-end)."""
+    H, W = mask.shape
+    k = max(3, int(round(0.006 * W)))
+    er = cv2.erode(mask.astype(np.uint8), np.ones((k, k), np.uint8))
+    n, lab, _, cents = cv2.connectedComponentsWithStats(er, 8)
+    if n <= 2:
+        return mask                                          # 0/1 component after erosion -> already single
+    ai = max(0, min(H - 1, int(ay))); aj = max(0, min(W - 1, int(ax)))
+    sl = int(lab[ai, aj])
+    if sl == 0:
+        sl = min(range(1, n), key=lambda i: (cents[i][0] - ax) ** 2 + (cents[i][1] - ay) ** 2)
+    comp = cv2.dilate((lab == sl).astype(np.uint8), np.ones((k, k), np.uint8)).astype(bool)
+    out = np.logical_and(comp, mask)
+    return out if out.any() else mask
 
 
 def _skin_mask(rgb, box):
@@ -250,6 +271,47 @@ def main():
         cv2.putText(vis, cap_txt, (8, 20), cv2.FONT_HERSHEY_SIMPLEX, 0.55, (255, 255, 0), 2, cv2.LINE_AA)
         cv2.imwrite(path, cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
 
+    def _zoom_reseg(rgb2, nm, gx, gy, ax, ay, hand_mask):
+        """STEP 3.5 — ZOOMED TEXT-SEG. Re-segment the CHOSEN name on a TIGHT upscaled crop around the grasp
+        (0.12·W, anchor-centred so the held object is in frame). A small/occluded object is a few pixels at
+        full-frame scale (ragged mask) but fills far more of SAM's input when the crop is upscaled, so text-seg
+        of its name returns a CLEAN mask. Returns (full-frame mask, sam) or None (keep the original mask)."""
+        rad = int(0.12 * W)
+        cx0, cy0 = max(0, gx - rad), max(0, gy - rad); cx1, cy1 = min(W, gx + rad), min(H, gy + rad)
+        crop = rgb2[cy0:cy1, cx0:cx1]
+        if crop.size == 0 or min(crop.shape[:2]) < 8:
+            return None
+        f = max(1, int(512 / max(crop.shape[:2])))            # upscale the crop to ~512px
+        up = cv2.resize(crop, (crop.shape[1] * f, crop.shape[0] * f), interpolation=cv2.INTER_CUBIC)
+        Hu, Wu = up.shape[:2]; acx, acy = (ax - cx0) * f, (ay - cy0) * f   # anchor in upscaled-crop coords
+        with torch.inference_mode(), ac:
+            st = proc.set_image(Image.fromarray(up))
+            out = proc.set_text_prompt(state=st, prompt=nm.split(" with ")[0].strip())
+        tm = _np(out["masks"]); ts = _np(out["scores"]).ravel()
+        if tm.ndim == 4:
+            tm = tm[:, 0]
+        best = None
+        for k in range(len(tm) if tm.ndim == 3 else 0):
+            mk = tm[k] > 0.5
+            if mk.ndim > 2:
+                mk = mk.squeeze()
+            if mk.shape != (Hu, Wu) or not mk.any() or not (0.0003 < float(mk.mean()) < 0.6):
+                continue
+            ys, xs = np.nonzero(mk); d = ((xs.mean() - acx) ** 2 + (ys.mean() - acy) ** 2) ** 0.5   # nearest the grasp
+            if best is None or d < best[2]:
+                best = (mk, float(ts[k]), d)
+        if best is None:
+            return None
+        small = cv2.resize(best[0].astype(np.uint8), (crop.shape[1], crop.shape[0]), interpolation=cv2.INTER_NEAREST)
+        full = np.zeros((H, W), bool); full[cy0:cy1, cx0:cx1] = small.astype(bool)
+        full = _clean(full, ax, ay)
+        # NO off-hand guard here: this is TEXT-SEG of a NAMED object (returns the object, not the hand), and a
+        # small object held in a precision pinch legitimately overlaps the hand silhouette. The name + the
+        # nearest-anchor selection + _clean already localize it; an off-hand reject would kill the real held part.
+        if not full.any() or not (0.0002 < float(full.mean()) < 0.40):
+            return None
+        return full, best[1]
+
     index = []
     prim_prompt = {}                                     # seg_id -> the primary prompt (for temporal re-seg)
     for t, plist in sorted(by_t.items()):
@@ -314,6 +376,21 @@ def main():
             mid = ((int((tpx[0] + ipx[0]) / 2), int((tpx[1] + ipx[1]) / 2)) if (tpx and ipx) else (gx, gy))
             shared = False
             ax, ay = float(mid[0]), float(mid[1])              # robust grasp anchor
+            # ANCHOR-FIX (bad keypoints): if the thumb-index anchor is splayed FAR from the hand's actual
+            # SKIN (an elongated-clutter pile fooled the pose model), relocate it onto the nearest hand-skin
+            # pixel so candidates come from the REAL grasp, not random pile parts. DISTANCE-gated, so a normal
+            # grasp (anchor in the small finger gap, ~object-width from skin) is NOT moved.
+            _skin = _skin_mask(rgb, (x0, y0, x1, y1))
+            if _skin is not None:
+                _dts = cv2.distanceTransform((~_skin).astype(np.uint8), cv2.DIST_L2, 3)
+                if _dts[_clamp(ay, 0, H - 1), _clamp(ax, 0, W - 1)] > 0.05 * W:        # far from any skin -> displaced
+                    sy_, sx_ = np.nonzero(_skin)
+                    i_ = int(np.argmin((sx_ - ax) ** 2 + (sy_ - ay) ** 2))
+                    ax, ay = float(sx_[i_]), float(sy_[i_])
+                    gx, gy = _clamp(ax, 0, W - 1), _clamp(ay, 0, H - 1)               # re-centre crop/seeds/window
+                    wpx, wpy = _clamp(2 * cx - gx, x0, x1), _clamp(2 * cy - gy, y0, y1)
+                    yl, yh = max(0, gy - pw), min(H, gy + pw + 1); xl, xh = max(0, gx - pw), min(W, gx + pw + 1)
+                    _dbg(f"[ANCHOR-FIX] {tag} t={t:.1f} {hand}: anchor splayed into clutter -> relocated to skin ({gx},{gy})")
             palmc = hull.mean(0) if (hull is not None and len(hull)) else (cx, cy)
             neg_all = [[wpx, wpy], [_clamp(palmc[0], 0, W - 1), _clamp(palmc[1], 0, H - 1)]]
             for q in plist:                                    # the OTHER hand as a NEGATIVE (don't grab it)
@@ -355,21 +432,18 @@ def main():
             tchain = list(p.get("thumb_chain_px") or []); ichain = list(p.get("index_chain_px") or [])
             pinch_region = _pinch_region(tchain + ichain, W, H)
             N_SEED = int(os.environ.get("N_SEED", "10"))
-            AREA_MAX = float(os.environ.get("AREA_MAX", "0.20"))   # frac-of-frame ceiling (MEDIUM objs allowed)
-            PIN_THR = float(os.environ.get("PIN_THR", "0.25"))      # mask must OVERLAP the pinch region (>=25%)
+            PIN_THR = float(os.environ.get("PIN_THR", "0.25"))      # point mask must OVERLAP the pinch region (>=25%)
 
             pool = []                                          # (name, mask, sam, src, manip, dist)
-            ts_masks = []                                      # text-seg masks (to exclude small dups of them)
-            for nm, mk, sc in segs:                            # (1) TEXT-SEG: clean named masks (normal/large objs)
+            for nm, mk, sc in segs:                            # (1) TEXT-SEG: clean named masks (by object name)
                 mk = _clean(mk, ax, ay)
                 if (not mk.any() or mk[wpy, wpx] or not mk[yl:yh, xl:xh].any() or mk[y0:y1, x0:x1].sum() == 0
                         or not (0.0005 < float(mk.mean()) < 0.40) or _on_hand(mk, hand_mask)):
                     continue
-                mn, dd = _manip(mk, sc); pool.append((nm, mk, sc, "TS", mn, dd)); ts_masks.append(mk)
-            # (2) SMALL-OBJECT LANE (user spec): segment AT the orange dot, then RANDOM points around it,
-            # re-segment, and KEEP a candidate only if it is (a) SMALL, (b) MOSTLY inside the thumb<->index
-            # pinch region, (c) OFF the hand (stronger SAM hand-mask reject), and (d) NOT already covered by a
-            # text-seg mask — i.e. a small object text-seg MISSED. The VLM then picks among the survivors.
+                mn, dd = _manip(mk, sc); pool.append((nm, mk, sc, "TS", mn, dd))
+            # (2) POINT-SEG: segment AT the orange dot + RANDOM points around it, re-segment. Keep a point mask
+            # if it OVERLAPS the thumb<->index pinch region and is OFF the hand. We DON'T drop ones that match a
+            # text mask — the VLM is SHOWN both the text-seg and point-seg versions and CHOOSES the better one.
             seed_pts = [(int(ax), int(ay))]
             if mid is not None:
                 ap = (((tpx[0] - ipx[0]) ** 2 + (tpx[1] - ipx[1]) ** 2) ** 0.5) if (tpx and ipx) else float(pw)
@@ -378,25 +452,21 @@ def main():
                 for _ in range(N_SEED):
                     dx, dy = rng.normal(0.0, sigp, 2)
                     seed_pts.append((_clamp(ax + dx, 0, W - 1), _clamp(ay + dy, 0, H - 1)))
-            seen_xy, n_kept, rej = set(), 0, {"area": 0, "pin": 0, "hand": 0, "dup": 0}
+            seen_xy, n_kept, rej = set(), 0, {"pin": 0, "hand": 0}
             for sx, sy in seed_pts:
                 if (sx, sy) in seen_xy:
                     continue
                 seen_xy.add((sx, sy))
                 for m, s in _seg_at(sx, sy):
-                    if float(m.mean()) >= AREA_MAX:                          # (a) area ceiling (medium ok)
-                        rej["area"] += 1; continue
                     if pinch_region is not None:
-                        if _frac_in(m, pinch_region) < PIN_THR:              # (b) OVERLAPS the finger-line gap
+                        if _frac_in(m, pinch_region) < PIN_THR:              # OVERLAPS the finger-line gap
                             rej["pin"] += 1; continue
                     elif tpx and ipx and _ti_band_score(m, tpx, ipx) < PIN_THR:  # fallback when chains missing
                         rej["pin"] += 1; continue
-                    if hand_mask is not None and _on_hand(m, hand_mask, thr=0.40):   # (c) off the hand (stronger)
+                    if hand_mask is not None and _on_hand(m, hand_mask, thr=0.40):   # off the hand
                         rej["hand"] += 1; continue
-                    if any(_frac_in(m, tm) > 0.5 for tm in ts_masks):        # (d) text-seg already has this object
-                        rej["dup"] += 1; continue
-                    mn, dd = _manip(m, s); pool.append(("", m, s, "PINCH", mn, dd)); n_kept += 1
-            _dbg(f"[SMALLOBJ] {tag} t={t:.1f} {hand}: seeds={len(seen_xy)} region={'Y' if pinch_region is not None else 'N'} kept={n_kept} rej={rej}")
+                    mn, dd = _manip(m, s); pool.append(("", m, s, "POINT", mn, dd)); n_kept += 1
+            _dbg(f"[POINTSEG] {tag} t={t:.1f} {hand}: seeds={len(seen_xy)} region={'Y' if pinch_region is not None else 'N'} kept={n_kept} rej={rej}")
             pool = [c for c in pool if c[5] <= GATE]           # GATE: drop far-from-grasp (pile/background)
             if not pool and hand_mask is not None:             # (3) ON-HAND RECOVERY: re-seed nearest NON-hand blob
                 sub = (~hand_mask)[y0:y1, x0:x1].astype(np.uint8)
@@ -421,74 +491,56 @@ def main():
             for c in pool:
                 if all(_iou(c[1], k[1]) < 0.8 for k in cands):
                     cands.append(c)
+            cands = cands[:5]                                  # cap for a clean chooser panel
             _dbg(f"[POOL] {tag} t={t:.1f} {hand} anchor=({int(ax)},{int(ay)}) shared={shared}: "
                  + " | ".join(f"{c[3]}{(':' + c[0][:10]) if c[0] else ''} manip={c[4]:.2f} d={c[5]:.2f} sam={c[2]:.2f}"
                               for c in pool))
             seed_viz = [(sx, sy, (255, 140, 0)) for (sx, sy) in seed_pts]   # orange = all multi-seed probe points
             win_seed = (int(ax), int(ay))                      # green ring = grasp anchor
+            cand_src = ["T" if c[3] == "TS" else "P" for c in cands]   # T=text-seg, P=point-seg (shown to the VLM)
             cands = [(n, m, s) for n, m, s, src, mn, dd in cands]
+            rad = int(0.12 * W)                                # PINCH-CENTERED crop bounds (chooser + DBG panel)
+            ex0, ey0 = max(0, gx - rad), max(0, gy - rad); ex1, ey1 = min(W, gx + rad), min(H, gy + rad)
 
-            # STEP 3: LLM names; SAFETY NET overrides a false N/A when a strong RULE-1 candidate exists
-            name, conf, chosen, src = "N/A", 0.0, None, ""
-            if cands:
-                # PINCH-CENTERED crop: zoom into the grasp so a small held object (a small part) is
-                # isolated for Claude, not lost in a cluttered hand-box view of the whole pile.
-                rad = int(0.12 * W)
-                ex0, ey0 = max(0, gx - rad), max(0, gy - rad)
-                ex1, ey1 = min(W, gx + rad), min(H, gy + rad)
-                zoom = rgb[ey0:ey1, ex0:ex1].copy()
-                for j, (nm, mk, sc) in enumerate(cands):
+            def _build_imgs(cc, csrc, suffix=""):
+                """Chooser images: a CLEAN crop (objects visible, no marks) + the SAME crop with numbered
+                candidate outlines (letter: T=text-seg, P=point-seg, Z=zoom). So the VLM sees the real objects
+                AND picks the right outline when several candidates overlap the same region."""
+                clean = rgb[ey0:ey1, ex0:ex1].copy()
+                cv2.circle(clean, (gx - ex0, gy - ey0), 7, (255, 40, 40), -1)
+                ov = rgb[ey0:ey1, ex0:ex1].copy()
+                for j, (nm, mk, sc) in enumerate(cc):
                     col = COLORS[j % len(COLORS)]
                     cont, _ = cv2.findContours(mk[ey0:ey1, ex0:ex1].astype(np.uint8),
                                                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    cv2.drawContours(zoom, cont, -1, col, 2)
+                    cv2.drawContours(ov, cont, -1, col, 2)
                     yx = np.argwhere(mk[ey0:ey1, ex0:ex1])
                     if len(yx):
                         yc, xc = map(int, yx.mean(0))
-                        cv2.putText(zoom, str(j), (xc, yc), cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, 3, cv2.LINE_AA)
-                cv2.circle(zoom, (gx - ex0, gy - ey0), 7, (255, 40, 40), -1)
-                zoom = cv2.resize(zoom, (zoom.shape[1] * 2, zoom.shape[0] * 2))
-                zpath = os.path.join(tmpd, f"z_{tag}_{t:.1f}_{p['hand']}.jpg")
-                cv2.imwrite(zpath, cv2.cvtColor(zoom, cv2.COLOR_RGB2BGR))
-                imgs = [zpath] + ([refsheet] if refsheet else [])
-                choice, nm = call_llm(imgs, hand, len(cands), all_names)
+                        cv2.putText(ov, f"{j}{csrc[j]}", (xc, yc), cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, 3, cv2.LINE_AA)
+                cv2.circle(ov, (gx - ex0, gy - ey0), 7, (255, 40, 40), -1)
+                outp = []
+                for tn, im in (("c" + suffix, clean), ("o" + suffix, ov)):
+                    im = cv2.resize(im, (im.shape[1] * 2, im.shape[0] * 2))
+                    pth = os.path.join(tmpd, f"{tn}_{tag}_{t:.1f}_{p['hand']}.jpg")
+                    cv2.imwrite(pth, cv2.cvtColor(im, cv2.COLOR_RGB2BGR)); outp.append(pth)
+                return outp + ([refsheet] if refsheet else [])
+
+            # STEP 3: LLM CHOOSER — shows the clean + overlay crops; picks the held candidate or N/A
+            name, conf, chosen, src = "N/A", 0.0, None, ""
+            if cands:
+                choice, nm = call_llm(_build_imgs(cands, cand_src), hand, len(cands), all_names)
                 _dbg(f"[DBG] {tag} t={t:.1f} {hand}: LLM choice={choice} name={nm!r}")
                 # RE-ASK once if Claude rejected a candidate that is RIGHT at the grasp (a point-prompt mask
                 # contains the pinch). Claude over-rejects small in-place manipulation as "not lifted out";
                 # this focused prompt counts it as holding, while still allowing N/A for a truly open/empty hand.
                 if choice < 0 and any(c[0] == "" for c in cands):
-                    # TIGHT crop on the candidate(s) — isolate + scale up the held part so Claude can name a
-                    # tiny object (a pen refill) that's lost in the wider pile view.
-                    union = np.logical_or.reduce([c[1] for c in cands])
-                    ys2, xs2 = np.nonzero(union)
-                    imgs2 = imgs
-                    if len(xs2):
-                        mg = int(0.05 * W)
-                        tx0, ty0 = max(0, int(xs2.min()) - mg), max(0, int(ys2.min()) - mg)
-                        tx1, ty1 = min(W, int(xs2.max()) + mg), min(H, int(ys2.max()) + mg)
-                        tz = rgb[ty0:ty1, tx0:tx1].copy()
-                        for j, (nm2, mk2, sc2) in enumerate(cands):
-                            col = COLORS[j % len(COLORS)]
-                            cont, _ = cv2.findContours(mk2[ty0:ty1, tx0:tx1].astype(np.uint8),
-                                                       cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                            cv2.drawContours(tz, cont, -1, col, 2)
-                            yx = np.argwhere(mk2[ty0:ty1, tx0:tx1])
-                            if len(yx):
-                                yc, xc = map(int, yx.mean(0))
-                                cv2.putText(tz, str(j), (xc, yc), cv2.FONT_HERSHEY_SIMPLEX, 0.7, col, 2, cv2.LINE_AA)
-                        if 0 <= gy - ty0 < tz.shape[0] and 0 <= gx - tx0 < tz.shape[1]:
-                            cv2.circle(tz, (gx - tx0, gy - ty0), 5, (255, 40, 40), -1)
-                        scl = max(2, int(560 / max(1, tz.shape[1])))
-                        tz = cv2.resize(tz, (tz.shape[1] * scl, tz.shape[0] * scl), interpolation=cv2.INTER_LINEAR)
-                        tzp = os.path.join(tmpd, f"zt_{tag}_{t:.1f}_{p['hand']}.jpg")
-                        cv2.imwrite(tzp, cv2.cvtColor(tz, cv2.COLOR_RGB2BGR))
-                        imgs2 = [tzp] + ([refsheet] if refsheet else [])
-                    fb = ("The highlighted object is RIGHT AT the grasp point (red dot), shown zoomed in. If the "
-                          "hand is touching / holding / manipulating it — INCLUDING small in-place work like "
-                          "assembling, threading, or picking a part from a pile — pick it and NAME it from the "
-                          "list. Answer N/A ONLY if the hand is clearly OPEN or EMPTY with nothing in it.")
-                    choice, nm = call_llm(imgs2, hand, len(cands), all_names, fb)
-                    _dbg(f"[DBG] {tag} t={t:.1f} {hand}: RE-ASK(tight) choice={choice} name={nm!r}")
+                    fb = ("The outlined object is RIGHT AT the grasp point (red dot). If the hand is touching / "
+                          "holding / manipulating it — INCLUDING small in-place work like assembling, threading, "
+                          "or picking a part from a pile — pick it and NAME it from the list. Answer N/A ONLY if "
+                          "the hand is clearly OPEN or EMPTY with nothing in it.")
+                    choice, nm = call_llm(_build_imgs(cands, cand_src, "t"), hand, len(cands), all_names, fb)
+                    _dbg(f"[DBG] {tag} t={t:.1f} {hand}: RE-ASK choice={choice} name={nm!r}")
                 # The LLM is the sole decider: it picks the manipulated candidate (+ name from the FULL
                 # inventory) or N/A. A point-prompt candidate has no built-in name, so it relies on the LLM
                 # naming it; if the LLM gives no valid name, it stays N/A.
@@ -519,7 +571,7 @@ def main():
                     if tman >= 0.75 and grip_v < 0.40 and toh < 0.35 and td < 0.4 and touch_skin and anchor_ok:
                         cnm = tn or (all_names[0] if len(all_names) == 1 else None)
                         if cnm is None:                          # unnamed + multi-vocab -> force a name (no N/A)
-                            _, fn2 = call_llm(imgs, hand, len(cands), all_names,
+                            _, fn2 = call_llm(_build_imgs(cands, cand_src), hand, len(cands), all_names,
                                               f"The {hand} hand IS firmly holding the highlighted object — NAME it "
                                               "from the list; N/A is NOT allowed.")
                             cnm = fn2 if (fn2 and fn2.upper() not in ("N/A", "NA")) else None
@@ -538,12 +590,12 @@ def main():
                         dcc = (((xs3.mean() - ax) ** 2 + (ys3.mean() - ay) ** 2) ** 0.5) / max(pw, 1)
                         oh = (float(np.logical_and(mk2, hand_mask).sum()) / float(mk2.sum())
                               if hand_mask is not None else 0.0)
-                        srcj = "TS" if nm2 else "PT"; star = "*" if j == choice else ""
+                        srcj = "TEXT" if nm2 else "POINT"; star = "*" if j == choice else ""
                         rep.append(f"{j}{star}:{srcj} s={sc2:.2f} d={dcc:.2f} oh={oh:.2f}")
                         yx = np.argwhere(sub)
                         if len(yx):
                             yc, xc = map(int, yx.mean(0))
-                            cv2.putText(panel, f"{j}{star}", (xc, yc), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
+                            cv2.putText(panel, f"{j}{cand_src[j]}{star}", (xc, yc), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
                     cv2.circle(panel, (_clamp(int(ax) - ex0, 0, panel.shape[1] - 1),
                                        _clamp(int(ay) - ey0, 0, panel.shape[0] - 1)), 6, (255, 140, 0), -1)
                     panel = cv2.resize(panel, (panel.shape[1] * 2, panel.shape[0] * 2))
@@ -551,6 +603,45 @@ def main():
                                 cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
                     _dbg(f"[CAND] {tag} t={t:.1f} {hand} choice={choice}: " + " | ".join(rep))
 
+            # RECOVERY: pool was empty OR the chooser said N/A. The held object may be small/occluded and only
+            # findable ZOOMED — full-frame text+point both failed RULE-1 at the grasp (early rejection).
+            # Run text-seg of each inventory name on the upscaled crop -> clean candidates at the grasp -> let the
+            # VLM pick (clean + overlay), or stay N/A. (A misdetected pile-as-hand should still get N/A.)
+            if ZOOM and chosen is None:
+                rc = []
+                for nm0 in all_names:
+                    zr0 = _zoom_reseg(rgb, nm0, gx, gy, ax, ay, hand_mask)
+                    if zr0 is not None:
+                        rc.append((nm0, zr0[0], float(zr0[1])))
+                rc2 = []
+                for c in sorted(rc, key=lambda c: -c[2]):
+                    if all(_iou(c[1], k[1]) < 0.8 for k in rc2):
+                        rc2.append(c)
+                rc2 = rc2[:5]
+                if rc2:
+                    rcs = [(n, m, s) for n, m, s in rc2]; rsrc = ["Z"] * len(rcs)
+                    fb = ("These outlines are ZOOMED segmentations of candidate objects at the grasp. If the hand "
+                          "IS holding one, pick it and NAME it from the list; answer N/A only if the hand is clearly "
+                          "empty / reaching / on bare skin or on a pile it is not gripping.")
+                    ch, nm2 = call_llm(_build_imgs(rcs, rsrc, "r"), hand, len(rcs), all_names, fb)
+                    _dbg(f"[RECOVER-ZOOM] {tag} t={t:.1f} {hand}: {len(rcs)} zoomed cands -> choice={ch} name={nm2!r}")
+                    if 0 <= ch < len(rcs):
+                        cnm = nm2 if (nm2 and nm2.upper() not in ("N/A", "NA")) else rcs[ch][0]
+                        if cnm:
+                            name, chosen, conf, src = cnm, rcs[ch][1], round(rcs[ch][2], 3), "zoom-recover"
+
+            # STEP 3.5: ZOOMED TEXT-SEG RE-SEGMENT — identity is decided; re-segment the CHOSEN name on a
+            # tight upscaled crop for a CLEAN mask (replaces a ragged full-frame mask of a small/occluded part).
+            if ZOOM and chosen is not None and "zoom" not in src and name and name.upper() not in ("N/A", "NA"):
+                zr = _zoom_reseg(rgb, name, gx, gy, ax, ay, hand_mask)
+                if zr is not None:
+                    chosen, conf = zr[0], round(float(zr[1]), 3); src = (src + "+zoom") if src else "zoom"
+                    _dbg(f"[ZOOM] {tag} t={t:.1f} {hand}: re-seg '{name}' -> clean zoomed mask (sam={zr[1]:.2f})")
+                else:
+                    _dbg(f"[ZOOM] {tag} t={t:.1f} {hand}: '{name}' not re-found in zoom crop -> kept original mask")
+
+            if chosen is not None:                             # drop an adjacent touching instance the mask merged
+                chosen = _split_at_anchor(chosen, ax, ay)
             vis = rgb.copy(); locked = chosen is not None
             if locked:
                 f = vis.astype(np.float32); f[chosen] = 0.5 * f[chosen] + 0.5 * np.array(COLORS[0], np.float32)
