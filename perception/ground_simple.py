@@ -186,6 +186,20 @@ def call_llm(imgs, hand, n, names, feedback=""):
         return -1, "N/A"
 
 
+def call_manip(imgs, hand, k=3):
+    """MANIPULATION GATE: broad hold-vs-empty decision (transparent-aware, k-vote). -> (manip, q1, q2, transp)
+    where transp = the transparent question (q1) reached majority -> used to STEER naming toward a clear object."""
+    try:
+        out = subprocess.run([PY310, os.path.join(HERE, "llm_manip.py"), ",".join(imgs), hand, str(k)],
+                             capture_output=True, text=True, timeout=240)
+        r = json.loads(out.stdout.strip().splitlines()[-1])
+        q1 = int(r.get("q1", 0)); kk = int(r.get("k", k)) or k
+        return bool(r.get("manip", False)), q1, int(r.get("q2", 0)), (q1 * 2 > kk)
+    except Exception as e:
+        _dbg(f"  call_manip error: {e}")
+        return False, 0, 0, False
+
+
 def main():
     global _DBGF
     outdir, inv_file, prompts_file = sys.argv[1], sys.argv[2], sys.argv[3]
@@ -430,7 +444,10 @@ def main():
             # PINCH REGION = the gap BETWEEN the two finger lines (thumb kp1-4, index kp5-8), where a
             # small precision-held object sits. Used to KEEP small-object candidates (below).
             tchain = list(p.get("thumb_chain_px") or []); ichain = list(p.get("index_chain_px") or [])
-            pinch_region = _pinch_region(tchain + ichain, W, H)
+            # Acceptance region around the orange grasp anchor / finger lines. A LITTLE BIGGER than before so a
+            # near point mask that the tight region rejected still counts — safe now that the
+            # manipulation gate (not this filter) decides N/A, so a bigger region can't cause false-grounds.
+            pinch_region = _pinch_region(tchain + ichain, W, H, dilate=max(16, int(0.30 * pw)))
             N_SEED = int(os.environ.get("N_SEED", "10"))
             PIN_THR = float(os.environ.get("PIN_THR", "0.25"))      # point mask must OVERLAP the pinch region (>=25%)
 
@@ -526,59 +543,39 @@ def main():
                     cv2.imwrite(pth, cv2.cvtColor(im, cv2.COLOR_RGB2BGR)); outp.append(pth)
                 return outp + ([refsheet] if refsheet else [])
 
-            # STEP 3: LLM CHOOSER — shows the clean + overlay crops; picks the held candidate or N/A
+            # STEP 3: MANIPULATION GATE (broad hold-vs-empty, transparent-aware, k-vote) -> then NAME.
+            # Decide manip FIRST; if yes we MUST ground (pick/force/zoom-recover), if no -> N/A. Replaces the
+            # flaky single-pick + geometry auto-accept that over-fired AND under-fired on transparent holds.
             name, conf, chosen, src = "N/A", 0.0, None, ""
-            if cands:
-                choice, nm = call_llm(_build_imgs(cands, cand_src), hand, len(cands), all_names)
-                _dbg(f"[DBG] {tag} t={t:.1f} {hand}: LLM choice={choice} name={nm!r}")
-                # RE-ASK once if Claude rejected a candidate that is RIGHT at the grasp (a point-prompt mask
-                # contains the pinch). Claude over-rejects small in-place manipulation as "not lifted out";
-                # this focused prompt counts it as holding, while still allowing N/A for a truly open/empty hand.
-                if choice < 0 and any(c[0] == "" for c in cands):
-                    fb = ("The outlined object is RIGHT AT the grasp point (red dot). If the hand is touching / "
-                          "holding / manipulating it — INCLUDING small in-place work like assembling, threading, "
-                          "or picking a part from a pile — pick it and NAME it from the list. Answer N/A ONLY if "
-                          "the hand is clearly OPEN or EMPTY with nothing in it.")
-                    choice, nm = call_llm(_build_imgs(cands, cand_src, "t"), hand, len(cands), all_names, fb)
-                    _dbg(f"[DBG] {tag} t={t:.1f} {hand}: RE-ASK choice={choice} name={nm!r}")
-                # The LLM is the sole decider: it picks the manipulated candidate (+ name from the FULL
-                # inventory) or N/A. A point-prompt candidate has no built-in name, so it relies on the LLM
-                # naming it; if the LLM gives no valid name, it stays N/A.
+            gimgs = _build_imgs(cands, cand_src)               # clean + overlay crops (overlay empty if no cands)
+            manip, q1, q2, transp = call_manip(gimgs, hand)
+            _dbg(f"[GATE] {tag} t={t:.1f} {hand}: manip={manip} (q1_transparent={q1} q2_object={q2} transp={transp})")
+            # LEVER 1: when the gate votes TRANSPARENT, steer naming to a clear object (fixes labelling a clear
+            # a clear vessel as an opaque object — the transparent signal otherwise never reaches naming).
+            _tn = (" The object is TRANSPARENT / clear see-through — name it as a CLEAR/transparent object from "
+                   "the list, NOT an opaque one.") if transp else ""
+            choice = -1
+            if manip and cands:
+                choice, nm = call_llm(gimgs, hand, len(cands), all_names,
+                                      "The hand IS manipulating an object here. Pick which numbered candidate it is "
+                                      "manipulating and NAME it from the list. Do NOT answer N/A." + _tn)
+                _dbg(f"[PICK] {tag} t={t:.1f} {hand}: choice={choice} name={nm!r}")
                 if 0 <= choice < len(cands):
-                    cnm = nm if nm and nm.upper() not in ("N/A", "NA") else cands[choice][0]
+                    cnm = nm if (nm and nm.upper() not in ("N/A", "NA")) else cands[choice][0]
                     if cnm:
                         name, chosen, conf, src = cnm, cands[choice][1], cands[choice][2], "llm"
-                # AUTO-ACCEPT a clearly-held object the LLM over-vetoed. Geometry + measured grip override the
-                # flaky veto: the top candidate must be strong (at the contact, off the hand), the grip a CLOSED
-                # grasp, AND it must TOUCH the SKIN hand — which validates it's a real held object adjacent to the
-                # actual hand, not a pile instance the (mis-detected) keypoints anchored on. True open/empty hands
-                # have a high grip + weaker candidate and don't pass.
+                # FORCE-PICK: the gate already decided the hand IS manipulating, so do NOT fall back to N/A. If the
+                # VLM still vetoed every candidate, take the top one (highest manip score) and name it (forced).
                 if chosen is None and cands:
-                    grip_v = p.get("grip"); grip_v = grip_v if grip_v is not None else 1.0
-                    tn, tm, ts_ = cands[0]
-                    ys5, xs5 = np.nonzero(tm)
-                    td = (((xs5.mean() - ax) ** 2 + (ys5.mean() - ay) ** 2) ** 0.5) / max(pw, 1)
-                    toh = (float(np.logical_and(tm, hand_mask).sum()) / float(tm.sum())) if hand_mask is not None else 0.0
-                    tman = (0.42 * max(0.0, 1 - td / 1.2) + 0.30 * (1 - toh)
-                            + 0.12 * (1.0 if float(tm.mean()) < 0.12 else 0.0) + 0.16 * ts_)
-                    skin = _skin_mask(rgb, (x0, y0, x1, y1))
-                    touch_skin = anchor_ok = False
-                    if skin is not None:
-                        sd = cv2.dilate(skin.astype(np.uint8), np.ones((9, 9), np.uint8)).astype(bool)
-                        touch_skin = bool(np.logical_and(tm, sd).any())          # candidate adjacent to the real hand
-                        dt = cv2.distanceTransform((~skin).astype(np.uint8), cv2.DIST_L2, 3)
-                        anchor_ok = dt[_clamp(ay, 0, H - 1), _clamp(ax, 0, W - 1)] <= 0.05 * W   # keypoints near real hand
-                    if tman >= 0.75 and grip_v < 0.40 and toh < 0.35 and td < 0.4 and touch_skin and anchor_ok:
-                        cnm = tn or (all_names[0] if len(all_names) == 1 else None)
-                        if cnm is None:                          # unnamed + multi-vocab -> force a name (no N/A)
-                            _, fn2 = call_llm(_build_imgs(cands, cand_src), hand, len(cands), all_names,
-                                              f"The {hand} hand IS firmly holding the highlighted object — NAME it "
-                                              "from the list; N/A is NOT allowed.")
-                            cnm = fn2 if (fn2 and fn2.upper() not in ("N/A", "NA")) else None
-                        if cnm:
-                            name, chosen, conf, src = cnm, tm, ts_, "auto"
-                            _dbg(f"[AUTO] {tag} t={t:.1f} {hand}: LLM-veto override -> {cnm!r} "
-                                 f"(manip={tman:.2f} grip={grip_v:.2f} d={td:.2f} oh={toh:.2f})")
+                    tn, tm, ts_ = cands[0]; cnm = tn
+                    if not cnm:                                  # unnamed point candidate -> force a name from the list
+                        _, fn2 = call_llm(gimgs, hand, len(cands), all_names,
+                                          f"The {hand} hand IS manipulating the highlighted object — NAME it from the "
+                                          "list; N/A is NOT allowed." + _tn)
+                        cnm = fn2 if (fn2 and fn2.upper() not in ("N/A", "NA")) else None
+                    if cnm:
+                        name, chosen, conf, src, choice = cnm, tm, ts_, "gate-pick", 0
+                        _dbg(f"[FORCE] {tag} t={t:.1f} {hand}: gate=manip, VLM vetoed -> top cand {cnm!r} (sam={ts_:.2f})")
                 if DBG:                                              # CANDIDATE PANEL: every candidate + source
                     panel = rgb[ey0:ey1, ex0:ex1].copy(); rep = []
                     for j, (nm2, mk2, sc2) in enumerate(cands):
@@ -603,11 +600,10 @@ def main():
                                 cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
                     _dbg(f"[CAND] {tag} t={t:.1f} {hand} choice={choice}: " + " | ".join(rep))
 
-            # RECOVERY: pool was empty OR the chooser said N/A. The held object may be small/occluded and only
-            # findable ZOOMED — full-frame text+point both failed RULE-1 at the grasp (early rejection).
-            # Run text-seg of each inventory name on the upscaled crop -> clean candidates at the grasp -> let the
-            # VLM pick (clean + overlay), or stay N/A. (A misdetected pile-as-hand should still get N/A.)
-            if ZOOM and chosen is None:
+            # RECOVERY: the gate says the hand IS manipulating but nothing grounded (empty pool / unnamed). The
+            # object may be small/occluded/transparent and only findable ZOOMED. Text-seg each inventory name on
+            # the upscaled crop -> clean candidates at the grasp -> VLM picks (gate already said manip, so ground).
+            if manip and chosen is None:
                 rc = []
                 for nm0 in all_names:
                     zr0 = _zoom_reseg(rgb, nm0, gx, gy, ax, ay, hand_mask)
@@ -615,23 +611,22 @@ def main():
                         rc.append((nm0, zr0[0], float(zr0[1])))
                 rc2 = []
                 for c in sorted(rc, key=lambda c: -c[2]):
-                    if all(_iou(c[1], k[1]) < 0.8 for k in rc2):
+                    if all(_iou(c[1], kk[1]) < 0.8 for kk in rc2):
                         rc2.append(c)
                 rc2 = rc2[:5]
                 if rc2:
                     rcs = [(n, m, s) for n, m, s in rc2]; rsrc = ["Z"] * len(rcs)
-                    fb = ("These outlines are ZOOMED segmentations of candidate objects at the grasp. If the hand "
-                          "IS holding one, pick it and NAME it from the list; answer N/A only if the hand is clearly "
-                          "empty / reaching / on bare skin or on a pile it is not gripping.")
-                    ch, nm2 = call_llm(_build_imgs(rcs, rsrc, "r"), hand, len(rcs), all_names, fb)
-                    _dbg(f"[RECOVER-ZOOM] {tag} t={t:.1f} {hand}: {len(rcs)} zoomed cands -> choice={ch} name={nm2!r}")
-                    if 0 <= ch < len(rcs):
-                        cnm = nm2 if (nm2 and nm2.upper() not in ("N/A", "NA")) else rcs[ch][0]
-                        if cnm:
-                            name, chosen, conf, src = cnm, rcs[ch][1], round(rcs[ch][2], 3), "zoom-recover"
+                    ch, nm2 = call_llm(_build_imgs(rcs, rsrc, "r"), hand, len(rcs), all_names,
+                                       "The hand IS manipulating an object. These are ZOOMED segmentations of "
+                                       "candidates at the grasp — pick the one it manipulates and NAME it (no N/A)." + _tn)
+                    pick = ch if (0 <= ch < len(rcs)) else 0   # gate=manip -> fall back to the best zoom candidate
+                    cnm = nm2 if (nm2 and nm2.upper() not in ("N/A", "NA")) else rcs[pick][0]
+                    _dbg(f"[RECOVER-ZOOM] {tag} t={t:.1f} {hand}: {len(rcs)} cands -> choice={ch} name={nm2!r} -> {cnm!r}")
+                    if cnm:
+                        name, chosen, conf, src = cnm, rcs[pick][1], round(rcs[pick][2], 3), "zoom-recover"
 
-            # STEP 3.5: ZOOMED TEXT-SEG RE-SEGMENT — identity is decided; re-segment the CHOSEN name on a
-            # tight upscaled crop for a CLEAN mask (replaces a ragged full-frame mask of a small/occluded part).
+            # STEP 3.5: ZOOMED TEXT-SEG RE-SEGMENT — refine the chosen mask on a tight upscaled crop (helps
+            # small/occluded parts). The result is the POINT-side mask (P) for the mask chooser below.
             if ZOOM and chosen is not None and "zoom" not in src and name and name.upper() not in ("N/A", "NA"):
                 zr = _zoom_reseg(rgb, name, gx, gy, ax, ay, hand_mask)
                 if zr is not None:
@@ -639,6 +634,38 @@ def main():
                     _dbg(f"[ZOOM] {tag} t={t:.1f} {hand}: re-seg '{name}' -> clean zoomed mask (sam={zr[1]:.2f})")
                 else:
                     _dbg(f"[ZOOM] {tag} t={t:.1f} {hand}: '{name}' not re-found in zoom crop -> kept original mask")
+
+            # MASK CHOOSER (user: keep BOTH point-seg and text-seg, then choose the more accurate). Build the
+            # full-frame TEXT-SEG mask of the named object at the grasp (T); if it differs from the current
+            # point/zoom mask (P), let the VLM pick whichever outline most accurately + completely fits the object.
+            if chosen is not None and name and name.upper() not in ("N/A", "NA"):
+                base = name.split(" with ")[0].strip().lower()
+                ts_alt = None
+                for nm_s, mk_s, sc_s in segs:
+                    if base not in nm_s.lower() and nm_s.lower() not in base:
+                        continue
+                    mks = _clean(mk_s, ax, ay)
+                    if (not mks.any() or mks[wpy, wpx] or not mks[yl:yh, xl:xh].any()
+                            or mks[y0:y1, x0:x1].sum() == 0 or not (0.0005 < float(mks.mean()) < 0.40)):
+                        continue
+                    ys_s, xs_s = np.nonzero(mks)
+                    d_s = (((xs_s.mean() - ax) ** 2 + (ys_s.mean() - ay) ** 2) ** 0.5) / max(pw, 1)
+                    if d_s > 1.2:
+                        continue
+                    if ts_alt is None or sc_s > ts_alt[1]:
+                        ts_alt = (mks, float(sc_s))
+                if ts_alt is not None and _iou(ts_alt[0], chosen) < 0.8:
+                    two = [(name, chosen, conf), (name, ts_alt[0], ts_alt[1])]
+                    ch2, _ = call_llm(_build_imgs(two, ["P", "T"], "m"), hand, 2, all_names,
+                                      f"Both outlines mark the SAME object ('{name}'): 0P is a point-prompt mask, "
+                                      "1T is a text-segmentation mask. Pick the NUMBER whose outline most ACCURATELY "
+                                      "and COMPLETELY fits that object — cleanest and full extent, NOT collapsed onto "
+                                      "its contents and NOT spilled onto background/hand.")
+                    if ch2 == 1:
+                        chosen, conf, src = ts_alt[0], round(ts_alt[1], 3), (src + "+T") if src else "ts"
+                        _dbg(f"[MASKPICK] {tag} t={t:.1f} {hand}: chose TEXT-seg mask for '{name}' (sam={ts_alt[1]:.2f})")
+                    else:
+                        _dbg(f"[MASKPICK] {tag} t={t:.1f} {hand}: kept point/zoom mask for '{name}'")
 
             if chosen is not None:                             # drop an adjacent touching instance the mask merged
                 chosen = _split_at_anchor(chosen, ax, ay)
