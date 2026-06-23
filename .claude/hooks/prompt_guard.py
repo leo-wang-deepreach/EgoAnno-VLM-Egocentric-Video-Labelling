@@ -2,18 +2,27 @@
 """PreToolUse / Edit|Write guard for the egoanno (factsfirst) project. Block-and-ask:
 exit 2 BLOCKS the write; exit 0 allows it.
 
-Blocks writing leaky content INTO a model-facing prompt file (factsfirst/prompts/*.txt):
-clip UUIDs, ground-truth paths, or reviewer-calibration material. Prompts must use typed
-placeholders (<part>, <counterpart>, <container>, <color>, <stable location>) only.
+Blocks writing leaky content INTO a model-facing prompt: clip UUIDs, ground-truth paths, or
+reviewer-calibration material. Prompts must use typed placeholders (<part>, <counterpart>,
+<container>, <color>, <stable location>) only.
+
+Guarded surfaces (model-facing prompts live in BOTH):
+  - factsfirst/prompts/*.txt              (frozen pipeline prompts)
+  - factsfirst/perception/llm_*.py        (the active grounder's INLINE prompts)
 
 FAIL-OPEN: on any internal error the guard allows the write. It blocks ONLY on a confirmed hit.
-Scoped to factsfirst/prompts/ — no-ops for every other file.
+No-ops for every other file.
 """
 import json
 import re
 import sys
 
 PROMPTS_DIR = "/home/ubuntu/local/factsfirst/prompts/"
+LLM_SRC = re.compile(r"/home/ubuntu/local/factsfirst/perception/llm_[^/]*\.py$")
+
+
+def _guarded(fp):
+    return (fp.startswith(PROMPTS_DIR) and fp.endswith(".txt")) or bool(LLM_SRC.search(fp))
 BAD = [
     (re.compile(r"[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}"), "clip UUID"),
     (re.compile(r"out/(gt|leo_edited|overrides)\b"), "ground-truth path"),
@@ -29,7 +38,7 @@ def main():
     except Exception:
         sys.exit(0)  # fail-open
     fp = ti.get("file_path", "") or ""
-    if not (fp.startswith(PROMPTS_DIR) and fp.endswith(".txt")):
+    if not _guarded(fp):
         sys.exit(0)
     content = ti.get("content")
     if content is None:

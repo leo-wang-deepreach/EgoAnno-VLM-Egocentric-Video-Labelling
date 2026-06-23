@@ -6,8 +6,9 @@ Two concerns, one process (cheap):
   1. GIT LEAK GUARD — block `git commit`/`git push` that would put a secret or
      held-out ground truth into a repo, and block `git add -f/--force` (which
      bypasses .gitignore). The repo is PUBLIC, so a leak is permanent.
-  2. PRE-RUN LEAK GATE — before launching a pipeline run, verify the prompts are
-     leak-clean via judge_leak_check.py; block the run if any prompt leaks.
+  2. PRE-RUN LEAK GATE — before launching a pipeline OR grounder run, verify every
+     model-facing prompt (prompts/*.txt AND the inline prompts in perception/llm_*.py)
+     is leak-clean via judge_leak_check.py; block the run if any prompt leaks.
 
 FAIL-OPEN: on any internal error the guard allows the call (a guard bug must never
 brick all git/runs). It blocks ONLY on a confirmed hit. .gitignore is the backstop.
@@ -41,7 +42,7 @@ CONTENT_BAD = [
     (re.compile(r"\bghp_[A-Za-z0-9]{30,}"), "GitHub token"),
     (re.compile(r"\bAKIA[0-9A-Z]{16}\b"), "AWS access key id"),
 ]
-LAUNCH = re.compile(r"\b(run\.sh|run\.py|pipeline2?\.py|leo_batch\.py)\b")
+LAUNCH = re.compile(r"\b(run\.sh|run\.py|pipeline2?\.py|leo_batch\.py|ground_simple\.py|ground_v16\.py)\b")
 
 # REMOVAL GUARD — block-and-ask before anything that DELETES/DISCARDS, so an impulsive `rm -rf`
 # can't nuke source/snapshots/logs/GT (the v30/v31 thrash). Destructive verbs:
@@ -114,8 +115,13 @@ def git_guard(cmd):
 def run_gate(cmd):
     if not LAUNCH.search(cmd) or not os.path.exists(CHECKER):
         return
+    # Model-facing prompts live BOTH in prompts/*.txt (frozen pipeline) AND inline in the
+    # active grounder's LLM helpers (perception/llm_*.py). Scan ALL of them before any run,
+    # so the grounder launch path (sam3py ground_simple.py ...) can't bypass the leak gate.
+    targets = (sorted(glob.glob(os.path.join(FACTS, "prompts", "*.txt")))
+               + sorted(glob.glob(os.path.join(FACTS, "perception", "llm_*.py"))))
     leaks = []
-    for p in sorted(glob.glob(os.path.join(FACTS, "prompts", "*.txt"))):
+    for p in targets:
         try:
             r = subprocess.run([PY, CHECKER, p], capture_output=True, text=True, timeout=15)
         except Exception:
