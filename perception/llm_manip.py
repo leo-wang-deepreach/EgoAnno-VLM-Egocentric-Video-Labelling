@@ -14,6 +14,8 @@ import json
 import sys
 from pathlib import Path
 
+from concurrent.futures import ThreadPoolExecutor
+
 from PIL import Image
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -57,14 +59,17 @@ def main():
     frames = [_b64(p) for p in imgs]
     sys_txt = SYS.format(hand=hand)
     user = (f"The {hand} hand. Is it manipulating an object right now? Answer q1_transparent and q2_object.")
-    q1 = q2 = 0
-    for _ in range(k):
+
+    def _vote(_):                                            # one independent gate vote (HTTP -> threads OK)
         try:
             r = claude_call(user, frames, sys_txt, SCHEMA, model=CLAUDE_GATE, max_tokens=300)
-            q1 += 1 if (r.get("q1_transparent", "no").lower() == "yes") else 0
-            q2 += 1 if (r.get("q2_object", "no").lower() == "yes") else 0
+            return (1 if r.get("q1_transparent", "no").lower() == "yes" else 0,
+                    1 if r.get("q2_object", "no").lower() == "yes" else 0)
         except Exception:
-            continue
+            return (0, 0)
+    with ThreadPoolExecutor(max_workers=k) as ex:           # k votes CONCURRENTLY (was sequential)
+        votes = list(ex.map(_vote, range(k)))
+    q1 = sum(v[0] for v in votes); q2 = sum(v[1] for v in votes)
     manip = (q1 * 2 > k) or (q2 * 2 > k)                      # majority on EITHER question
     print(json.dumps({"manip": bool(manip), "q1": q1, "q2": q2, "k": k}))
 
