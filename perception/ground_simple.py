@@ -145,35 +145,6 @@ def _split_at_anchor(mask, ax, ay):
     return out if out.any() else mask
 
 
-def _skin_mask(rgb, box):
-    """Hand region by SKIN COLOR — robust where the keypoint/box detection is fooled by clutter (a metallic
-    pile of small elongated parts looks finger-like, so the pose model lands keypoints on it; skin color separates the real
-    hand from the silver pile). Adaptive: sample the box bottom-centre (reliably wrist/arm skin) as reference,
-    keep pixels close in (Cr,Cb), take the largest connected blob. Returns a full-frame bool mask or None."""
-    H, W = rgb.shape[:2]
-    x0, y0, x1, y1 = [int(v) for v in box]
-    ex0, ey0 = max(0, x0 - 12), max(0, y0 - 12); ex1, ey1 = min(W, x1 + 12), min(H, y1 + 12)
-    if ex1 - ex0 < 10 or ey1 - ey0 < 10:
-        return None
-    ycc = cv2.cvtColor(rgb[ey0:ey1, ex0:ex1], cv2.COLOR_RGB2YCrCb)
-    bh, bw = ycc.shape[:2]
-    patch = ycc[int(bh * 0.7):bh, int(bw * 0.3):int(bw * 0.7)].reshape(-1, 3)   # arm/wrist = reliable skin
-    if len(patch) < 30:
-        return None
-    ref = np.median(patch, axis=0)
-    d = np.abs(ycc[:, :, 1].astype(int) - ref[1]) + np.abs(ycc[:, :, 2].astype(int) - ref[2])
-    skin = (d < 18).astype(np.uint8)
-    skin = cv2.morphologyEx(skin, cv2.MORPH_OPEN, np.ones((3, 3), np.uint8))
-    n, lab, st, _ = cv2.connectedComponentsWithStats(skin, 8)
-    if n <= 1:
-        return None
-    big = max(range(1, n), key=lambda i: st[i, cv2.CC_STAT_AREA])
-    if st[big, cv2.CC_STAT_AREA] < 0.05 * skin.size:        # too little skin found -> unreliable
-        return None
-    out = np.zeros((H, W), bool); out[ey0:ey1, ex0:ex1] = (lab == big)
-    return cv2.dilate(out.astype(np.uint8), np.ones((7, 7), np.uint8)).astype(bool)
-
-
 def call_llm(imgs, hand, n, names, feedback=""):
     """STEP 3: Claude picks the manipulated candidate # + names it from the vocab (or -1/N/A)."""
     try:
@@ -367,7 +338,7 @@ def main():
             hull = np.array(p.get("hull_px", []), float).reshape(-1, 2) if p.get("hull_px") else None
             tpx, ipx = p.get("thumb_px"), p.get("index_px")      # thumb-tip kp4, index-tip kp8 (object in the gap)
             # HAND MASK = SAM keypoint-segmentation (skin-mask-as-guard was tried but over-rejects small objects
-            # held BETWEEN skin fingers; _skin_mask is kept for keypoint VALIDATION, not the guard).
+            # held BETWEEN skin fingers, so it is not used).
             hand_mask = None
             if hull is not None and len(hull) >= 3:
                 with torch.inference_mode(), ac:
@@ -392,21 +363,6 @@ def main():
             mid = ((int((tpx[0] + ipx[0]) / 2), int((tpx[1] + ipx[1]) / 2)) if (tpx and ipx) else (gx, gy))
             shared = False
             ax, ay = float(mid[0]), float(mid[1])              # robust grasp anchor
-            # ANCHOR-FIX (bad keypoints): if the thumb-index anchor is splayed FAR from the hand's actual
-            # SKIN (an elongated-clutter pile fooled the pose model), relocate it onto the nearest hand-skin
-            # pixel so candidates come from the REAL grasp, not random pile parts. DISTANCE-gated, so a normal
-            # grasp (anchor in the small finger gap, ~object-width from skin) is NOT moved.
-            _skin = _skin_mask(rgb, (x0, y0, x1, y1))
-            if _skin is not None:
-                _dts = cv2.distanceTransform((~_skin).astype(np.uint8), cv2.DIST_L2, 3)
-                if _dts[_clamp(ay, 0, H - 1), _clamp(ax, 0, W - 1)] > 0.05 * W:        # far from any skin -> displaced
-                    sy_, sx_ = np.nonzero(_skin)
-                    i_ = int(np.argmin((sx_ - ax) ** 2 + (sy_ - ay) ** 2))
-                    ax, ay = float(sx_[i_]), float(sy_[i_])
-                    gx, gy = _clamp(ax, 0, W - 1), _clamp(ay, 0, H - 1)               # re-centre crop/seeds/window
-                    wpx, wpy = _clamp(2 * cx - gx, x0, x1), _clamp(2 * cy - gy, y0, y1)
-                    yl, yh = max(0, gy - pw), min(H, gy + pw + 1); xl, xh = max(0, gx - pw), min(W, gx + pw + 1)
-                    _dbg(f"[ANCHOR-FIX] {tag} t={t:.1f} {hand}: anchor splayed into clutter -> relocated to skin ({gx},{gy})")
             palmc = hull.mean(0) if (hull is not None and len(hull)) else (cx, cy)
             neg_all = [[wpx, wpy], [_clamp(palmc[0], 0, W - 1), _clamp(palmc[1], 0, H - 1)]]
             for q in plist:                                    # the OTHER hand as a NEGATIVE (don't grab it)
@@ -633,38 +589,6 @@ def main():
                     _dbg(f"[ZOOM] {tag} t={t:.1f} {hand}: re-seg '{name}' -> clean zoomed mask (sam={zr[1]:.2f})")
                 else:
                     _dbg(f"[ZOOM] {tag} t={t:.1f} {hand}: '{name}' not re-found in zoom crop -> kept original mask")
-
-            # MASK CHOOSER (user: keep BOTH point-seg and text-seg, then choose the more accurate). Build the
-            # full-frame TEXT-SEG mask of the named object at the grasp (T); if it differs from the current
-            # point/zoom mask (P), let the VLM pick whichever outline most accurately + completely fits the object.
-            if chosen is not None and name and name.upper() not in ("N/A", "NA"):
-                base = name.split(" with ")[0].strip().lower()
-                ts_alt = None
-                for nm_s, mk_s, sc_s in segs:
-                    if base not in nm_s.lower() and nm_s.lower() not in base:
-                        continue
-                    mks = _clean(mk_s, ax, ay)
-                    if (not mks.any() or mks[wpy, wpx] or not mks[yl:yh, xl:xh].any()
-                            or mks[y0:y1, x0:x1].sum() == 0 or not (0.0005 < float(mks.mean()) < 0.40)):
-                        continue
-                    ys_s, xs_s = np.nonzero(mks)
-                    d_s = (((xs_s.mean() - ax) ** 2 + (ys_s.mean() - ay) ** 2) ** 0.5) / max(pw, 1)
-                    if d_s > 1.2:
-                        continue
-                    if ts_alt is None or sc_s > ts_alt[1]:
-                        ts_alt = (mks, float(sc_s))
-                if ts_alt is not None and _iou(ts_alt[0], chosen) < 0.8:
-                    two = [(name, chosen, conf), (name, ts_alt[0], ts_alt[1])]
-                    ch2, _ = call_llm(_build_imgs(two, ["P", "T"], "m"), hand, 2, all_names,
-                                      f"Both outlines mark the SAME object ('{name}'): 0P is a point-prompt mask, "
-                                      "1T is a text-segmentation mask. Pick the NUMBER whose outline most ACCURATELY "
-                                      "and COMPLETELY fits that object — cleanest and full extent, NOT collapsed onto "
-                                      "its contents and NOT spilled onto background/hand.")
-                    if ch2 == 1:
-                        chosen, conf, src = ts_alt[0], round(ts_alt[1], 3), (src + "+T") if src else "ts"
-                        _dbg(f"[MASKPICK] {tag} t={t:.1f} {hand}: chose TEXT-seg mask for '{name}' (sam={ts_alt[1]:.2f})")
-                    else:
-                        _dbg(f"[MASKPICK] {tag} t={t:.1f} {hand}: kept point/zoom mask for '{name}'")
 
             if chosen is not None:                             # drop an adjacent touching instance the mask merged
                 chosen = _split_at_anchor(chosen, ax, ay)
