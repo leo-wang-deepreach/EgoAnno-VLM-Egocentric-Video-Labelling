@@ -311,7 +311,9 @@ def main():
                 mk = mk.squeeze()
             if mk.shape != (Hu, Wu) or not mk.any() or not (0.0003 < float(mk.mean()) < 0.6):
                 continue
-            ys, xs = np.nonzero(mk); d = ((xs.mean() - acx) ** 2 + (ys.mean() - acy) ** 2) ** 0.5   # nearest the grasp
+            ys, xs = np.nonzero(mk); d = ((xs.mean() - acx) ** 2 + (ys.mean() - acy) ** 2) ** 0.5   # to the grasp anchor
+            if d > 0.33 * max(Hu, Wu):                   # MUST be AT the grasp — never grab a far pile instance
+                continue                                 # (else the held object isn't text-segmentable here -> keep original)
             if best is None or d < best[2]:
                 best = (mk, float(ts[k]), d)
         if best is None:
@@ -550,10 +552,7 @@ def main():
             gimgs = _build_imgs(cands, cand_src)               # clean + overlay crops (overlay empty if no cands)
             manip, q1, q2, transp = call_manip(gimgs, hand)
             _dbg(f"[GATE] {tag} t={t:.1f} {hand}: manip={manip} (q1_transparent={q1} q2_object={q2} transp={transp})")
-            # LEVER 1: when the gate votes TRANSPARENT, steer naming to a clear object (fixes labelling a clear
-            # a clear vessel as an opaque object — the transparent signal otherwise never reaches naming).
-            _tn = (" The object is TRANSPARENT / clear see-through — name it as a CLEAR/transparent object from "
-                   "the list, NOT an opaque one.") if transp else ""
+            _tn = ""   # Lever-1 transparent naming-steer REMOVED per user (no Labels fixes)
             choice = -1
             if manip and cands:
                 choice, nm = call_llm(gimgs, hand, len(cands), all_names,
