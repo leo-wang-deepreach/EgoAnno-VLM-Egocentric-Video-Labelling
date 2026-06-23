@@ -75,3 +75,34 @@ perception/*.npz
 perception/*.npy
 perception/*/
 !perception/*.py
+
+# session handoff (local only, contains clip tags + object names)
+handoff.md
+
+# ─── one-off probes / experiments (kept local; not part of the committed pipeline) ──
+# These re-ignore lines come AFTER `!perception/*.py` so they win for these specific files.
+perception/amg_test.py
+perception/depth_check.py
+perception/depth_pass_da3.py
+perception/edge_probe.py
+perception/exp_debug237.py
+perception/exp_orange_seed.py
+perception/fix_existing.py
+perception/ground_crops.py
+perception/ground_diag.py
+perception/ground_probe.py
+perception/ground_probe2.py
+perception/ground_segments.py
+perception/ground_textseg.py
+perception/ground_video.py
+perception/montage.py
+perception/probe.py
+perception/render_ab.py
+perception/text_seg_test.py
+perception/track_all.py
+perception/track_objects.py
+perception/track_one.py
+perception/track_seeds.py
+perception/track_test.py
+perception/track_validate.py
+perception/track_video.py
