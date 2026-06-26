@@ -11,18 +11,18 @@
   body{margin:0;background:var(--bg);color:var(--txt);font:13.5px/1.55 ui-sans-serif,system-ui,-apple-system,"Segoe UI",Roboto,sans-serif}
   header{padding:12px 18px;border-bottom:1px solid var(--line);display:flex;gap:14px;align-items:center;flex-wrap:wrap;position:sticky;top:0;background:var(--bg);z-index:5}
   header h1{font-size:15px;margin:0;font-weight:700;letter-spacing:.3px}
-  select{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:5px 9px;font:inherit}
+  select{background:var(--panel);color:var(--txt);border:1px solid var(--line);border-radius:7px;padding:5px 9px;font:inherit;max-width:62vw}
+  optgroup{color:var(--acc);font-weight:700} option{color:var(--txt);font-weight:400}
   label.sel{font-size:11px;letter-spacing:.08em;text-transform:uppercase;color:var(--mut);display:inline-flex;align-items:center;gap:6px}
   label.sel select{text-transform:none;letter-spacing:0;color:var(--txt)}
   .pill{font-size:12px;padding:2px 9px;border-radius:999px;background:#21262d;border:1px solid var(--line);color:var(--mut)}
   .pill b{color:var(--txt)} .pill.good b{color:var(--good)} .pill.bad b{color:var(--acc)}
-  .wrap{display:grid;grid-template-columns:minmax(0,1.15fr) minmax(0,1fr);gap:16px;padding:16px 18px;align-items:start}
-  @media(max-width:1050px){.wrap{grid-template-columns:1fr}}
-  /* keep the video + live labels in view while scrolling the per-section panels */
-  .leftcol{position:sticky;top:58px;align-self:start;max-height:calc(100vh - 70px);overflow:auto}
-  @media(max-width:1050px){.leftcol{position:static;max-height:none;overflow:visible}}
+  /* VERTICAL layout: single column (no left/right split of the page) */
+  .wrap{display:flex;flex-direction:column;gap:16px;padding:16px 18px;max-width:1100px;margin:0 auto}
+  .leftcol{position:static;max-height:none;overflow:visible}
   video{width:100%;border-radius:10px;background:#000;display:block}
   .goal{color:var(--mut);font-size:13px;margin:8px 2px 0}
+  /* the two HANDS stay side-by-side (left=left, right=right) */
   .now{display:grid;grid-template-columns:1fr 1fr;gap:10px;margin-top:10px}
   .hand{padding:10px 13px;border-radius:10px;background:var(--panel);border:1px solid var(--line);min-height:58px}
   .hand .tag{font-size:11px;letter-spacing:.12em;text-transform:uppercase;color:var(--mut)}
@@ -65,8 +65,7 @@
 <body>
 <header>
   <h1>egoanno · facts-first</h1>
-  <label class="sel">version <select id="ver" title="pick a pipeline version, then a clip under it"></select></label>
-  <label class="sel">clip <select id="pick"></select></label>
+  <label class="sel">clip <select id="pick" title="grouped by version — newest version at the top"></select></label>
   <span class="pill">dir <b id="dir">—</b></span>
   <span class="pill">segments <b id="nseg">—</b></span>
   <span class="pill">dur <b id="dur">—</b></span>
@@ -95,42 +94,41 @@ const $=s=>document.querySelector(s);
 const esc=s=>(s==null?'':String(s)).replace(/[&<>]/g,c=>({'&':'&amp;','<':'&lt;','>':'&gt;'}[c]));
 const isNA=s=>!s||String(s).trim().toUpperCase()==='N/A';
 const f1=t=>(+t).toFixed(1)+'s';
-const PROV={dense_grid:'#30363d',transition:'#1f6feb',v49_segment:'#238636',
-  seg_reconcile:'#8957e5',gate_seam_merge:'#d29922',fresh_eye:'#db61a2',
+const PROV={dense_grid:'#30363d',transition:'#1f6feb',measured_transition:'#1f6feb',
+  measured_action:'#238636',v49_segment:'#238636',combed:'#8957e5',seg_reconcile:'#8957e5',
+  gate_seam_merge:'#d29922',fresh_eye:'#db61a2',global_audit_gpt:'#db61a2',
   segment:'#30363d',cycle_template:'#30363d'};
 const shortLab=s=>{const r=(!s.right||/^n\/a$/i.test(s.right))?s.left:s.right;
   return isNA(r)?'·':String(r).split(/\s+/).slice(0,2).join(' ');};
-let EP=null,SEGS=[],DUR=0,CLIPS=[],ALLVERS=[],curVer=null;
+const verNum=v=>{const m=String(v).match(/\d+/);return m?+m[0]:0;};
+// the new measured-spine pipeline is labelled v2/v3 (low numbers, but NEWEST in time) —
+// rank single-digit versions as the most recent so they sit at the TOP of the dropdown.
+const verRank=v=>{const n=verNum(v);return n<10?1000+n:n;};
+let EP=null,SEGS=[],DUR=0,CLIPS=[];
 
 async function loadManifest(){
   let mani={clips:[]};
   try{ mani=await (await fetch('factsfirst_manifest.json?_='+Date.now())).json(); }catch(e){}
   CLIPS=mani.clips||[];
-  // VERSION FIRST: collect every distinct version across all clips
   const vs=new Set(); CLIPS.forEach(c=>(c.versions||[]).forEach(v=>vs.add(v.ver)));
-  ALLVERS=[...vs].sort();
-  const verSel=$('#ver'); verSel.innerHTML='';
-  if(!ALLVERS.length){ $('#pick').innerHTML='<option>no episodes yet</option>'; return; }
-  ALLVERS.forEach(v=>{ const o=document.createElement('option'); o.value=v; o.textContent=v; verSel.appendChild(o); });
-  verSel.value=ALLVERS[ALLVERS.length-1];             // newest version by default
-  verSel.onchange=()=>selVersion(verSel.value);
-  selVersion(verSel.value);
-}
-
-// pick a version -> list every clip that HAS that version, then load one
-function selVersion(ver){
-  curVer=ver;
-  const withVer=CLIPS.map((c,i)=>({c,i})).filter(o=>(o.c.versions||[]).some(v=>v.ver===ver));
-  const pick=$('#pick'); pick.innerHTML='';
-  withVer.forEach(o=>{ const op=document.createElement('option'); op.value=o.i; op.textContent=o.c.clip; pick.appendChild(op); });
+  const allVers=[...vs].sort((a,b)=>verRank(b)-verRank(a));        // newest version group first
+  const pick=$('#pick');
+  if(!allVers.length){ pick.innerHTML='<option>no episodes yet</option>'; return; }
+  // ONE dropdown, like /viewer/: an <optgroup> per version (newest at top), clips inside.
+  pick.innerHTML=allVers.map(ver=>{
+    const opts=CLIPS.map((c,i)=>({c,i})).filter(o=>(o.c.versions||[]).some(v=>v.ver===ver))
+      .map(o=>`<option value="${o.i}|${ver}">${esc(o.c.clip)}</option>`).join('');
+    return `<optgroup label="${esc(ver)}">${opts}</optgroup>`;
+  }).join('');
   pick.onchange=()=>loadSel();
-  if(withVer.length){ loadSel(); }
-  else { $('#panels').innerHTML='<div class="goal">no clips have a '+ver+' result yet</div>'; }
+  loadSel();                                                       // newest version, first clip
 }
 
 function loadSel(){
-  const c=CLIPS[+$('#pick').value];
-  const v=(c.versions||[]).find(x=>x.ver===curVer) || (c.versions||[]).slice(-1)[0];
+  const val=$('#pick').value; if(!val||val.indexOf('|')<0) return;
+  const [i,ver]=val.split('|');
+  const c=CLIPS[+i]; if(!c) return;
+  const v=(c.versions||[]).find(x=>x.ver===ver) || (c.versions||[]).slice(-1)[0];
   if(v) loadClip(v);
 }
 
@@ -171,131 +169,48 @@ function buildTimeline(){
 }
 
 const STEPMETA={
- '0' :{fps:'source fps',inp:'raw video → handpose YOLO (green=L / blue=R circles, slight spotlight)',out:'overlaid video → clock → seen by EVERY stage'},
- '1a':{fps:'10 fps',inp:'whole clip, 20s windows — PIXELS w/ L/R circles',out:'object catalogue + per-frame fg/bg/contact (N/A when a hand is empty)'},
- '1c':{fps:'30 fps',inp:'sliding 3.5s windows — PIXELS (opus)',out:'place/pickup/handoff events'},
- '2' :{fps:'30 fps',inp:'short burst windows — PIXELS (opus)',out:'rotation/role/colour verdicts'},
- '3' :{fps:'10 fps',inp:'whole clip + objects + track + bursts',out:'direction + derived goal'},
- '4' :{fps:'10 fps',inp:'segment: video + goal + burst verdicts (+track/transition hints in facts-first) · label: per-seg window + L/R circles + neighbours',out:'segments + per-hand labels'},
- '4d':{fps:'TEXT only',inp:'label timeline + track (NO video)',out:'verifier flags'},
- '4e':{fps:'CODE only',inp:'track / labels / transitions',out:'advisory analysis + flags'},
- '5' :{fps:'2 fps',inp:'whole-clip frames + timeline + flags + analysis (opus)',out:'corrections + quality verdict'},
- '6' :{fps:'4 fps',inp:'whole-clip frames w/ labels overlaid, NO other context (opus)',out:'corrected timeline'},
+ '0' :{fps:'source fps',inp:'raw video → handpose YOLO (green=L / blue=R circles)',out:'overlaid video → clock → seen by EVERY stage'},
+ '4' :{fps:'10 fps',inp:'measured segments + per-hand facts + object inventory + rotation',out:'per-hand atomic labels'},
+ '5' :{fps:'2 fps',inp:'whole-clip frames + timeline (opus)',out:'corrections + quality verdict'},
 };
 function sect(title,sub,inner,open){
   const key=(title.match(/Step\s+([0-9][a-z]?)/)||[])[1];
   const m=key&&STEPMETA[key]; let bar='';
   if(m){ sub=(sub?sub+' · ':'')+m.fps;
     bar=`<div class="iobar"><span class="io-in"><b>in</b> ${esc(m.inp)}</span><span class="io-out"><b>out</b> ${esc(m.out)}</span><span class="io-fps">${esc(m.fps)}</span></div>`; }
-  return `<section><h2 data-t onclick="this.nextElementSibling.classList.toggle('collapsed')">
+  return `<section><h2 onclick="this.nextElementSibling.classList.toggle('collapsed')">
     <span>${title}</span><span class="sub">${sub||''}</span></h2>
     <div class="body${open?'':' collapsed'}">${bar}${inner}</div></section>`;
 }
-function trackTbl(tr){
-  let h='';
-  for(const hand of ['left','right']){
-    const ivs=(tr&&tr[hand])||[];
-    h+=`<div style="margin:4px 0 2px"><b style="color:${hand=='left'?'var(--L)':'var(--R)'}">${hand.toUpperCase()}</b> · ${ivs.length} intervals</div>`;
-    h+= ivs.length? '<table>'+ivs.map(iv=>`<tr><td class="t">${f1(iv.start_sec)}–${f1(iv.end_sec)}</td><td>${esc(iv.interacting_with)}</td></tr>`).join('')+'</table>' : '<div class="empty">none</div>';
-  }
-  return h;
-}
 
 function buildPanels(){
-  const segTrace=EP._seg_trace||[];
   const flagsBy={}; (EP._flags||[]).forEach(f=>{(flagsBy[f.seg]=flagsBy[f.seg]||[]).push(f);});
   const segRows=SEGS.map((s,i)=>{
     const fl=(flagsBy[i+1]||[]).map(f=>`⚑${esc(f.type)}`).join(' ');
-    const tr0=segTrace[i]||{};
-    const think=tr0.label_think||'';
-    const li=tr0.label_in||null;
-    const gx=tr0.gate||null;
     return `<tr class="row-click" data-i="${i}" onclick="document.getElementById('vid').currentTime=${s.start_sec}+0.02">
       <td class="t">#${i+1}<br>${f1(s.start_sec)}<br>${f1(s.end_sec)}</td>
       <td><div class="ll ${isNA(s.left)?'na':''}">L · ${esc(s.left)}</div>
           <div class="rr ${isNA(s.right)?'na':''}">R · ${esc(s.right)}</div>
-          <div class="prov">${esc(s.boundary_provenance)} · conf ${s.confidence} ${fl?'· <span class=flag>'+fl+'</span>':''}</div>
-          ${think?`<div class="think">💭 ${esc(think)}</div>`:''}
-          ${li?`<div class="think">📥 labeler input: ${esc(li.window)} · transition hint: ${esc(li.transition_hint)}<br><span style="color:var(--mut)">contact facts: ${esc(li.facts||'')}</span></div>`:''}
-          ${gx?`<div class="think">⚙ gate edit: ${esc((gx.left?('L "'+gx.left.from+'"→"'+gx.left.to+'" '):'')+(gx.right?('R "'+gx.right.from+'"→"'+gx.right.to+'"'):''))}</div>`:''}</td></tr>`;
+          <div class="prov">${esc(s.boundary_provenance)}${fl?' · <span class=flag>'+fl+'</span>':''}</div></td></tr>`;
   }).join('');
-
-  const tr=EP._track||{left:[],right:[]};
-  const trans=EP._transitions||[];
-  const bs=EP._direction_burst_summary||{};
-  const br=EP._bursts_reduced||[];
   const objs=EP.objects||[];
   const qa=(EP._qa&&EP._qa.violations)||EP._qa||[];
 
-  // panels in CHRONOLOGICAL pipeline order: step 1 (facts) -> last step (fresh-eye)
-  const cf=EP._contact_frames||[];
-  const cfTbl=cf.length?'<div style="max-height:300px;overflow:auto"><table><thead><tr><th>t</th><th>foreground</th><th>background</th><th>L</th><th>R</th></tr></thead>'+
-    cf.map(fr=>`<tr><td class="t">${f1(fr.t)}</td><td>${esc(fr.foreground||'')}</td><td>${esc(fr.background||'')}</td><td class="ll">${esc(fr.left_touching||'')}</td><td class="rr">${esc(fr.right_touching||'')}</td></tr>`).join('')+'</table></div>':'<div class="empty">no per-frame facts</div>';
-  // STAGE TRACE — the timeline after each transform (find the bad step)
-  const stages=EP._stages||[];
-  const traceHtml=stages.length?stages.map(st=>
-    `<div style="margin:0 0 10px"><b style="color:var(--acc)">${esc(st.stage)}</b> · ${st.n} segs
-     <table>${(st.segs||[]).map((g,i)=>`<tr><td class="t">#${i+1} ${f1(g.start_sec)}–${f1(g.end_sec)}</td><td class="ll ${isNA(g.left)?'na':''}">${esc(g.left)}</td><td class="rr ${isNA(g.right)?'na':''}">${esc(g.right)}</td></tr>`).join('')}</table></div>`
-    ).join(''):'<div class="empty">no stage trace in this episode — re-run on current code to capture it</div>';
-  const feSegs=SEGS.filter(s=>s.boundary_provenance==='fresh_eye').length;
-
   let html='';
-  // STEP 0 — hand-circle overlay (v41): the working video every stage sees
   html+=sect('Step 0 · hand-circle overlay (green=L / blue=R)','burned into the working video',
-    `<div class="kv">The raw clip is first run through the fine-tuned YOLOv8m-pose hand detector; each hand gets a coloured circle burned in — <b style="color:var(--L)">green = LEFT</b>, <b style="color:var(--R)">blue = RIGHT</b> — with a slight spotlight (background still visible). This overlaid video gets the clock and is what EVERY stage below reads, so left/right is <b>visual</b>, not guessed. The player above is showing it.</div>`, false);
-  // STAGE TRACE (open) — watch the timeline evolve, spot the step that broke it
-  html+=sect('▶ Stage trace — timeline after each step (find the bad step)',
-    stages.length+' stages', traceHtml, true);
-  const LEAN=!cf.length;
-  if(LEAN){
-    // lean is the DEFAULT flow — 1A/1C don't run
-    html+=sect('Steps 1a + 1c · skipped (lean flow — default)','direction+burst → segment+label',
-      `<div class="kv">Lean flow is the <b>default</b>. The 1A per-frame contact track and 1C transition scan are <b>skipped</b>:
-       <ul style="margin:6px 0 0 16px;padding:0">
-       <li>Left/right identity comes straight from the burned <b style="color:var(--L)">green</b> (L) / <b style="color:var(--R)">blue</b> (R) circles.</li>
-       <li>Objects are named plainly by the labeler per segment — no upfront catalogue.</li>
-       <li>Segmentation reads the video directly (goal + burst verdicts only, no track/transition hints).</li>
-       </ul>
-       Pass <code>--facts-first</code> to use the legacy 1A/1C-seeded path.</div>`);
-  } else {
-    // STEP 1a — objects + contact track (ground truth)
-    html+=sect('Step 1a · objects + contact track (ground truth)',
-      objs.length+' objects · '+cf.length+' frames',
-      `<div class="kv"><b>objects:</b> ${objs.map(o=>`<span class="chip">${esc(o.name)}${o.colour?' ('+esc(o.colour)+')':''}</span>`).join('')}</div>
-       <div style="margin-top:8px"><b class="kv">per-frame facts (fg / bg / contact — ALL ${cf.length} frames):</b>${cfTbl}</div>
-       <div style="margin-top:8px"><b class="kv">possession (RAW 1A objects, no actions):</b>${trackTbl(EP._contact_track||tr)}</div>`);
-    // STEP 1c — transitions
-    html+=sect('Step 1c · transitions (place/pickup/handoff)',trans.length+' events',
-      trans.length?'<table>'+trans.map(e=>`<tr><td class="t">${f1(e.t)}</td><td>${esc(e.hand)} · <b>${esc(e.kind)}</b> · ${esc(e.object||'')}</td></tr>`).join('')+'</table>':'<div class="empty">none detected</div>');
-  }
-  // STEP 2 — rotation bursts
-  html+=sect('Step 2 · rotation bursts + reduce','claude opus · deterministic reduce',
-    `<div class="kv">summary: ${Object.entries(bs).map(([k,v])=>`<span class="chip">${esc(k)}=${esc(JSON.stringify(v))}</span>`).join('')||'<span class=empty>none</span>'}</div>
-     <div class="kv" style="margin-top:6px"><b>decisive verdicts:</b></div>
-     ${br.length?'<div>'+br.map(b=>`<span class="chip">${esc(b)}</span>`).join('')+'</div>':'<div class="empty">none</div>'}`);
-  // STEP 3 — direction
-  html+=sect('Step 3 · direction',EP.direction,
-    `<div class="kv"><b>direction:</b> ${esc(EP.direction)} · <b>phase switch:</b> ${EP.phase_switch_sec==null?'none':f1(EP.phase_switch_sec)}</div>
-     <div class="kv" style="margin-top:4px"><b>derived goal:</b> ${esc(EP.goal)}</div>`);
-  // STEP 4 — segments + labels (the result) — open
+    `<div class="kv">The clip runs through the fine-tuned YOLOv8m-pose hand detector; each hand gets a coloured circle — <b style="color:var(--L)">green = LEFT</b>, <b style="color:var(--R)">blue = RIGHT</b>. The crops the labeler sees carry this so left/right is <b>measured</b>, not guessed.</div>`, false);
+  html+=sect('Objects · scene inventory',objs.length+' objects',
+    `<div class="kv">${objs.length?objs.map(o=>`<span class="chip">${esc(o.name)}</span>`).join(''):'<span class=empty>none</span>'}</div>`, false);
+  html+=sect('Step 3 · direction',EP.direction||'—',
+    `<div class="kv"><b>direction:</b> ${esc(EP.direction)} · <b>goal:</b> ${esc(EP.goal)}</div>`, false);
   html+=sect('Step 4 · segments + labels (result)',SEGS.length+' segments',
     `<table><thead><tr><th>seg</th><th>left / right · origin</th></tr></thead><tbody id="segbody">${segRows}</tbody></table>`,true);
-  // STEP 4d — verifier flags (template_match + neighbor_review + analysis)
-  html+=sect('Step 4d · verifier flags',(EP._flags||[]).length+' flags',
+  html+=sect('Step 4d · cross-check flags',(EP._flags||[]).length+' flags',
     (EP._flags||[]).length?'<table>'+(EP._flags||[]).map(f=>`<tr><td class="t">seg#${f.seg}</td><td><b>${esc(f.type)}</b> <span class=prov>(${esc(f.raised_by)})</span><br>${esc(f.detail)}</td></tr>`).join('')+'</table>':'<div class="empty">none</div>');
-  // STEP 4e — code analysis (advisory, deterministic)
-  html+=sect('Step 4e · code analysis (advisory)',(EP._flags||[]).filter(f=>f.raised_by==='analysis').length+' flags',
-    `<div class="kv" style="white-space:pre-wrap;font-size:12px;line-height:1.5">${esc(EP._analysis_report)||'<span class=empty>none</span>'}</div>`);
-  // STEP 5 — gate + QA
-  html+=sect('Step 5 · gate + QA','claude opus',
-    `<div class="kv">purpose (<b>${esc(EP._purpose_verdict)}</b>): ${esc(EP.goal)}</div>
-     <div class="kv" style="margin-top:5px"><b>findings:</b> ${esc(EP._gate_findings)||'<span class=empty>none</span>'}</div>
-     <div class="kv" style="margin-top:7px"><b>QA needs-review (${qa.length}):</b></div>
+  html+=sect('Step 5 · gate + QA','',
+    `<div class="kv"><b>findings:</b> ${esc(EP._gate_findings)||'<span class=empty>none</span>'}</div>
+     <div class="kv" style="margin-top:7px"><b>QA (${qa.length}):</b></div>
      ${qa.length?'<table>'+qa.map(v=>`<tr><td class="t">seg#${v.seg}</td><td>${esc(v.code)} · ${esc(v.hand)} — ${esc(v.detail)}</td></tr>`).join('')+'</table>':'<div class="empty">no deterministic conflicts</div>'}`);
-  // STEP 6 — fresh-eye (final, context-free review)
-  html+=sect('Step 6 · fresh-eye (final, context-free)',feSegs?('rewrote '+feSegs+' segs'):'',
-    `<div class="kv">${esc(EP._fresh_eye)||'<span class=empty>fresh-eye left the timeline unchanged or did not run</span>'}</div>`);
-
   $('#panels').innerHTML=html;
 }
 
@@ -307,8 +222,6 @@ function tick(){
   L.textContent=s?s.left:'—'; L.className='lab'+(s&&isNA(s.left)?' na':'');
   R.textContent=s?s.right:'—'; R.className='lab'+(s&&isNA(s.right)?' na':'');
   document.querySelectorAll('.tl .seg').forEach(e=>e.classList.toggle('cur',+e.dataset.i===i));
-  // highlight the current segment row, but do NOT scroll the page (it would fight
-  // the user scrolling up to the video). The sticky video + live L/R panel track it.
   document.querySelectorAll('#segbody tr').forEach(e=>e.classList.toggle('cur',+e.dataset.i===i));
 }
 loadManifest();

@@ -39,6 +39,10 @@ PINCH = float(os.environ.get("PINCH", "0.045"))
 REFS_DIR = os.environ.get("REFS_DIR", "")
 DBG = os.environ.get("DBG", "")
 ZOOM = os.environ.get("ZOOM", "1") != "0"               # STEP 3.5: re-seg the chosen name on a zoomed crop
+TRACKS_DIR = os.environ.get("TRACKS_DIR", "")           # SAM3-VIDEO tracks: when set, the TEXT-SEG candidate
+#   lane is the inventory masks FOLLOWED through the whole clip (track_objects.py) instead of a fresh per-frame
+#   text-seg. A tracked object carries ONE consistent identity (named once), so the LLM only picks the better
+#   OUTLINE (track-text-seg vs point-seg) — it does not re-name a tracked object. Unset -> per-frame text-seg.
 COLORS = [(80, 255, 80), (80, 160, 255), (255, 255, 60), (255, 80, 255), (80, 255, 255), (255, 160, 80)]
 _DBGF = None
 
@@ -85,10 +89,47 @@ def _clean(m, ax, ay):
     return mm.astype(bool)
 
 
+def _grasp_blobs(m, ax, ay, box, pw, gate):
+    """For a TEXT-SEG mask: keep EVERY connected component that touches the hand box AND comes within `gate`
+    of the grasp, UNIONED — so an occlusion-split held tool (a grip speck + its exposed shaft, separated where
+    the fingers cross it) is kept WHOLE instead of trimmed to the tiny anchor blob, while far pile/background
+    instances of the same name are dropped. Falls back to the single anchor blob if nothing qualifies."""
+    x0, y0, x1, y1 = box
+    n, lab, _, _ = cv2.connectedComponentsWithStats(m.astype(np.uint8), 8)
+    ai = max(0, min(m.shape[0] - 1, int(ay))); aj = max(0, min(m.shape[1] - 1, int(ax)))
+    keep = np.zeros(m.shape, bool)
+    for i in range(1, n):
+        comp = (lab == i)
+        if comp[y0:y1, x0:x1].sum() == 0:                    # must touch the hand box
+            continue
+        if comp[ai, aj]:
+            d = 0.0
+        else:
+            dt = cv2.distanceTransform((~comp).astype(np.uint8), cv2.DIST_L2, 3)
+            d = float(dt[ai, aj]) / max(pw, 1)
+        if d <= gate:                                        # ... and come within the grasp gate
+            keep |= comp
+    if not keep.any():
+        return _clean(m, ax, ay)
+    return cv2.morphologyEx(keep.astype(np.uint8), cv2.MORPH_CLOSE, np.ones((5, 5), np.uint8)).astype(bool)
+
+
 def _frac_in(a, b):
     """Fraction of mask a that lies inside mask/region b."""
     sa = float(a.sum())
     return float(np.logical_and(a, b).sum()) / sa if sa else 0.0
+
+
+def _track_name_for(mask, tracks, thr=0.30):
+    """TRACKS mode — identity for a POINT mask: the tracked object whose carried mask it most overlaps
+    (fraction of the point mask inside the track). Keeps even point picks on the consistent track vocabulary;
+    '' if it matches no track (then the LLM names it)."""
+    best, bn = thr, ""
+    for nm, tm in tracks.items():
+        f = _frac_in(mask, tm)
+        if f > best:
+            best, bn = f, nm
+    return bn
 
 
 def _pinch_region(pts, W, H, dilate=10):
@@ -125,26 +166,6 @@ def _ti_band_score(mk, tp, ip):
     return float((d <= band).mean())
 
 
-def _split_at_anchor(mask, ax, ay):
-    """Separate two TOUCHING instances: erode to break the thin junction between adjacent objects, keep the
-    connected component containing the anchor, dilate back, intersect with the original for exact boundaries.
-    No-op for a single clean blob (erosion still yields one component) — fixes a held mask that merged the
-    adjacent touching part (two parts touching end-to-end)."""
-    H, W = mask.shape
-    k = max(3, int(round(0.006 * W)))
-    er = cv2.erode(mask.astype(np.uint8), np.ones((k, k), np.uint8))
-    n, lab, _, cents = cv2.connectedComponentsWithStats(er, 8)
-    if n <= 2:
-        return mask                                          # 0/1 component after erosion -> already single
-    ai = max(0, min(H - 1, int(ay))); aj = max(0, min(W - 1, int(ax)))
-    sl = int(lab[ai, aj])
-    if sl == 0:
-        sl = min(range(1, n), key=lambda i: (cents[i][0] - ax) ** 2 + (cents[i][1] - ay) ** 2)
-    comp = cv2.dilate((lab == sl).astype(np.uint8), np.ones((k, k), np.uint8)).astype(bool)
-    out = np.logical_and(comp, mask)
-    return out if out.any() else mask
-
-
 def call_llm(imgs, hand, n, names, feedback=""):
     """STEP 3: Claude picks the manipulated candidate # + names it from the vocab (or -1/N/A)."""
     try:
@@ -157,9 +178,12 @@ def call_llm(imgs, hand, n, names, feedback=""):
         return -1, "N/A"
 
 
-def call_manip(imgs, hand, k=3):
+def call_manip(imgs, hand, k=None):
     """MANIPULATION GATE: broad hold-vs-empty decision (transparent-aware, k-vote). -> (manip, q1, q2, transp)
-    where transp = the transparent question (q1) reached majority -> used to STEER naming toward a clear object."""
+    where transp = the transparent question (q1) reached majority -> used to STEER naming toward a clear object.
+    k defaults to env GATE_K (3) so the number of gate votes is tunable for cost."""
+    if k is None:
+        k = int(os.environ.get("GATE_K", "3"))
     try:
         out = subprocess.run([PY310, os.path.join(HERE, "llm_manip.py"), ",".join(imgs), hand, str(k)],
                              capture_output=True, text=True, timeout=240)
@@ -306,25 +330,35 @@ def main():
         if not ok:
             continue
         rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+        tracks = {}                                              # TRACKS lane: {name: carried mask} at this time
+        if TRACKS_DIR:
+            npz = os.path.join(TRACKS_DIR, f"{tag}_t{t:05.1f}.npz")
+            if os.path.exists(npz):
+                z = np.load(npz, allow_pickle=True)
+                tracks = {k: z[k].astype(bool) for k in z.files if z[k].shape == (H, W) and z[k].any()}
+            _dbg(f"[TRACKS] {tag} t={t:.1f}: {sorted(tracks)} (npz={'Y' if os.path.exists(npz) else 'MISSING'})")
         with torch.inference_mode(), ac:
             state = proc.set_image(Image.fromarray(rgb))
             segs = []                                            # STEP 1: (name, mask, score) per verified object
-            for nm in names:
-                out = proc.set_text_prompt(state=state, prompt=nm.split(" with ")[0].strip())
-                tm = _np(out["masks"]); ts = _np(out["scores"]).ravel()
-                if tm.ndim == 4:
-                    tm = tm[:, 0]
-                for k in range(len(tm) if tm.ndim == 3 else 0):
-                    mk = tm[k] > 0.5
-                    if mk.ndim > 2:
-                        mk = mk.squeeze()
-                    if mk.any() and mk.shape == (H, W):
-                        segs.append((nm, mk, float(ts[k])))
+            if not TRACKS_DIR:                                   # per-frame text-seg (skipped when tracking)
+                for nm in names:
+                    out = proc.set_text_prompt(state=state, prompt=nm.split(" with ")[0].strip())
+                    tm = _np(out["masks"]); ts = _np(out["scores"]).ravel()
+                    if tm.ndim == 4:
+                        tm = tm[:, 0]
+                    for k in range(len(tm) if tm.ndim == 3 else 0):
+                        mk = tm[k] > 0.5
+                        if mk.ndim > 2:
+                            mk = mk.squeeze()
+                        if mk.any() and mk.shape == (H, W):
+                            segs.append((nm, mk, float(ts[k])))
+            else:                                                # TRACKS lane: carried masks = the text-seg candidates
+                segs = [(nm, mk, 0.85) for nm, mk in tracks.items()]
 
         for p in plist:
             gx, gy = _clamp(p["x_px"], 0, W - 1), _clamp(p["y_px"], 0, H - 1)
             x0, y0, x1, y1 = p["box_px"]; cx, cy = (x0 + x1) / 2, (y0 + y1) / 2
-            wpx, wpy = _clamp(2 * cx - gx, x0, x1), _clamp(2 * cy - gy, y0, y1)
+            wpx, wpy = _clamp(2 * cx - gx, x0, min(x1, W - 1)), _clamp(2 * cy - gy, y0, min(y1, H - 1))  # mirror wrist pt, kept a valid pixel index (box edge can equal frame size)
             hand = "LEFT" if p["hand"] == "L" else "RIGHT"
             pw = max(20, int(PINCH * W)); yl, yh = max(0, gy - pw), min(H, gy + pw + 1)
             xl, xh = max(0, gx - pw), min(W, gx + pw + 1)
@@ -373,7 +407,15 @@ def main():
 
             def _manip(mk, sam):                              # balanced manipulation confidence (0..1)
                 ys4, xs4 = np.nonzero(mk)
-                dist = (((xs4.mean() - ax) ** 2 + (ys4.mean() - ay) ** 2) ** 0.5) / max(pw, 1)
+                if os.environ.get("NEAREST_GRASP", "1") != "0":
+                    ay_i = int(_clamp(ay, 0, mk.shape[0] - 1)); ax_i = int(_clamp(ax, 0, mk.shape[1] - 1))
+                    if mk[ay_i, ax_i]:                        # grasp anchor sits ON the object (e.g. a held pen)
+                        dist = 0.0
+                    else:                                     # distance from the grasp to the object's NEAREST point
+                        dt = cv2.distanceTransform((~mk).astype(np.uint8), cv2.DIST_L2, 3)
+                        dist = float(dt[ay_i, ax_i]) / max(pw, 1)
+                else:
+                    dist = (((xs4.mean() - ax) ** 2 + (ys4.mean() - ay) ** 2) ** 0.5) / max(pw, 1)
                 oh = (float(np.logical_and(mk, hand_mask).sum()) / float(mk.sum())) if hand_mask is not None else 0.0
                 area = float(mk.mean())
                 sized = 1.0 if area < 0.12 else max(0.0, 1.0 - (area - 0.12) / 0.18)
@@ -411,10 +453,16 @@ def main():
 
             pool = []                                          # (name, mask, sam, src, manip, dist)
             for nm, mk, sc in segs:                            # (1) TEXT-SEG: clean named masks (by object name)
-                mk = _clean(mk, ax, ay)
-                if (not mk.any() or mk[wpy, wpx] or not mk[yl:yh, xl:xh].any() or mk[y0:y1, x0:x1].sum() == 0
-                        or not (0.0005 < float(mk.mean()) < 0.40) or _on_hand(mk, hand_mask)):
-                    continue
+                # Keep the WHOLE held object: every near-grasp, in-box component unioned, so a finger-occluded
+                # elongated tool (grip speck + exposed shaft, split where the fingers cross it) survives at FULL
+                # extent instead of being trimmed to the tiny anchor blob. (lim 2.0 spans the finger gap.)
+                mk = _grasp_blobs(mk, ax, ay, (x0, y0, x1, y1), pw, 2.0)
+                # THE ONLY text-seg gate: part of the object must fall inside the hand box. No band/size/
+                # wrist/on-hand pre-filtering — every in-box mask is handed to the VLM, so the VLM does the
+                # precision selection from the full set of in-box candidates.
+                rj = "empty" if not mk.any() else "outbox" if mk[y0:y1, x0:x1].sum() == 0 else None
+                if rj:
+                    _dbg(f"[TSREJ] {tag} t={t:.1f} {hand} '{nm}': {rj}"); continue
                 mn, dd = _manip(mk, sc); pool.append((nm, mk, sc, "TS", mn, dd))
             # (2) POINT-SEG: segment AT the orange dot + RANDOM points around it, re-segment. Keep a point mask
             # if it OVERLAPS the thumb<->index pinch region and is OFF the hand. We DON'T drop ones that match a
@@ -442,7 +490,7 @@ def main():
                         rej["hand"] += 1; continue
                     mn, dd = _manip(m, s); pool.append(("", m, s, "POINT", mn, dd)); n_kept += 1
             _dbg(f"[POINTSEG] {tag} t={t:.1f} {hand}: seeds={len(seen_xy)} region={'Y' if pinch_region is not None else 'N'} kept={n_kept} rej={rej}")
-            pool = [c for c in pool if c[5] <= GATE]           # GATE: drop far-from-grasp (pile/background)
+            pool = [c for c in pool if c[3] == "TS" or c[5] <= GATE]   # hand box is the ONLY text-seg gate (above); POINT picks still drop if far from the grasp
             if not pool and hand_mask is not None:             # (3) ON-HAND RECOVERY: re-seed nearest NON-hand blob
                 sub = (~hand_mask)[y0:y1, x0:x1].astype(np.uint8)
                 nC, _, statsC, centsC = cv2.connectedComponentsWithStats(sub, 8)
@@ -474,29 +522,59 @@ def main():
             win_seed = (int(ax), int(ay))                      # green ring = grasp anchor
             cand_src = ["T" if c[3] == "TS" else "P" for c in cands]   # T=text-seg, P=point-seg (shown to the VLM)
             cands = [(n, m, s) for n, m, s, src, mn, dd in cands]
-            rad = int(0.12 * W)                                # PINCH-CENTERED crop bounds (chooser + DBG panel)
-            ex0, ey0 = max(0, gx - rad), max(0, gy - rad); ex1, ey1 = min(W, gx + rad), min(H, gy + rad)
+            focus = int(0.12 * W)                              # GRASP focus box (drawn yellow): where the object is gripped
+
+            def _crop_for(cc):
+                """Chooser/DBG crop bounds: WIDE enough to show each candidate's FULL extent (so an elongated
+                held tool isn't cut off and a better mask is missed), anchored on the grasp focus box and capped
+                at +-0.35W so a far stray candidate can't balloon the view."""
+                mr = int(0.35 * W)
+                bx0, by0, bx1, by1 = gx - focus, gy - focus, gx + focus, gy + focus
+                for _, mk, _ in cc:
+                    ys_, xs_ = np.nonzero(mk)
+                    if len(xs_):
+                        bx0 = min(bx0, int(xs_.min())); by0 = min(by0, int(ys_.min()))
+                        bx1 = max(bx1, int(xs_.max())); by1 = max(by1, int(ys_.max()))
+                pad = int(0.04 * W)
+                return (max(0, gx - mr, bx0 - pad), max(0, gy - mr, by0 - pad),
+                        min(W, gx + mr, bx1 + pad), min(H, gy + mr, by1 + pad))
+
+            ex0, ey0, ex1, ey1 = _crop_for(cands)              # bounds for the DBG candidate panel
 
             def _build_imgs(cc, csrc, suffix=""):
                 """Chooser images: a CLEAN crop (objects visible, no marks) + the SAME crop with numbered
-                candidate outlines (letter: T=text-seg, P=point-seg, Z=zoom). So the VLM sees the real objects
-                AND picks the right outline when several candidates overlap the same region."""
-                clean = rgb[ey0:ey1, ex0:ex1].copy()
-                cv2.circle(clean, (gx - ex0, gy - ey0), 7, (255, 40, 40), -1)
-                ov = rgb[ey0:ey1, ex0:ex1].copy()
-                for j, (nm, mk, sc) in enumerate(cc):
-                    col = COLORS[j % len(COLORS)]
-                    cont, _ = cv2.findContours(mk[ey0:ey1, ex0:ex1].astype(np.uint8),
+                candidate outlines (letter: T=text-seg, P=point-seg, Z=zoom) AND a yellow GRASP focus box. The
+                crop is WIDE enough to show each candidate's full extent (so a long held tool isn't cut off and a
+                better mask missed), and the yellow box marks where the object is gripped so the VLM can prefer
+                the fuller mask without losing track of which hand/grasp this is about."""
+                bx0, by0, bx1, by1 = _crop_for(cc)
+                clean = rgb[by0:by1, bx0:bx1].copy()
+                ov = rgb[by0:by1, bx0:bx1].copy()
+                for j, (nm, mk, sc) in enumerate(cc):           # colored outline only — the bottom KEY maps colour->object
+                    cont, _ = cv2.findContours(mk[by0:by1, bx0:bx1].astype(np.uint8),
                                                cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
-                    cv2.drawContours(ov, cont, -1, col, 2)
-                    yx = np.argwhere(mk[ey0:ey1, ex0:ex1])
-                    if len(yx):
-                        yc, xc = map(int, yx.mean(0))
-                        cv2.putText(ov, f"{j}{csrc[j]}", (xc, yc), cv2.FONT_HERSHEY_SIMPLEX, 0.9, col, 3, cv2.LINE_AA)
-                cv2.circle(ov, (gx - ex0, gy - ey0), 7, (255, 40, 40), -1)
+                    cv2.drawContours(ov, cont, -1, COLORS[j % len(COLORS)], 2)
+                for im in (clean, ov):                          # yellow GRASP focus box + red grip dot on BOTH crops
+                    cv2.rectangle(im, (max(0, gx - focus) - bx0, max(0, gy - focus) - by0),
+                                  (min(W, gx + focus) - bx0, min(H, gy + focus) - by0), (255, 230, 0), 2)
+                    cv2.circle(im, (gx - bx0, gy - by0), 7, (255, 40, 40), -1)
+                # KEY/legend strip under the overlay: each numbered outline -> what SAM segmented it as, in its
+                # own color. The grip outlines overlap heavily, so the number alone is ambiguous; the key lets the
+                # VLM map colour -> object (e.g. "1T = paper") instead of guessing from the number's position.
+                if cc:
+                    rowh = max(22, int(0.030 * ov.shape[1])); pad = 8
+                    legend = np.full((rowh * len(cc) + 2 * pad, ov.shape[1], 3), 24, np.uint8)
+                    fs = ov.shape[1] / 760.0
+                    for j, (nm, mk, sc) in enumerate(cc):
+                        col = COLORS[j % len(COLORS)]; yy = pad + j * rowh
+                        cv2.rectangle(legend, (pad, yy + 3), (pad + rowh - 8, yy + rowh - 5), col, -1)
+                        cv2.putText(legend, f"{j}{csrc[j]} = {nm if nm else 'point-seg (unnamed blob)'}",
+                                    (pad + rowh, yy + rowh - 8), cv2.FONT_HERSHEY_SIMPLEX, 0.55 * fs, col, max(1, int(fs)), cv2.LINE_AA)
+                    ov = np.vstack([ov, legend])
                 outp = []
                 for tn, im in (("c" + suffix, clean), ("o" + suffix, ov)):
-                    im = cv2.resize(im, (im.shape[1] * 2, im.shape[0] * 2))
+                    sc_ = 896.0 / max(1, im.shape[0], im.shape[1])  # normalize the longer side (~896px) so detail is consistent
+                    im = cv2.resize(im, (max(1, int(im.shape[1] * sc_)), max(1, int(im.shape[0] * sc_))))
                     pth = os.path.join(tmpd, f"{tn}_{tag}_{t:.1f}_{p['hand']}.jpg")
                     cv2.imwrite(pth, cv2.cvtColor(im, cv2.COLOR_RGB2BGR)); outp.append(pth)
                 return outp + ([refsheet] if refsheet else [])
@@ -511,25 +589,39 @@ def main():
             _tn = ""   # Lever-1 transparent naming-steer REMOVED per user (no Labels fixes)
             choice = -1
             if manip and cands:
-                choice, nm = call_llm(gimgs, hand, len(cands), all_names,
-                                      "The hand IS manipulating an object here. Pick which numbered candidate it is "
-                                      "manipulating and NAME it from the list. Do NOT answer N/A." + _tn)
+                pick_fb = ("The hand IS manipulating an object here. Each candidate is one OUTLINE of the held "
+                           "object — some are text-segmentation (T), some are point-segmentation (P). Pick the "
+                           "ONE whose outline most accurately covers the object the hand is holding, and NAME it "
+                           "from the list. Do NOT answer N/A." + _tn) if TRACKS_DIR else \
+                          ("The hand IS manipulating an object here. Pick which numbered candidate it is "
+                           "manipulating and NAME it from the list. Do NOT answer N/A." + _tn)
+                choice, nm = call_llm(gimgs, hand, len(cands), all_names, pick_fb)
                 _dbg(f"[PICK] {tag} t={t:.1f} {hand}: choice={choice} name={nm!r}")
                 if 0 <= choice < len(cands):
-                    cnm = nm if (nm and nm.upper() not in ("N/A", "NA")) else cands[choice][0]
+                    cand_name, cand_mask, cand_sc = cands[choice]
+                    if TRACKS_DIR and cand_name:                 # picked a TRACK candidate -> consistent track identity
+                        cnm, src0 = cand_name, "track"
+                    elif TRACKS_DIR:                             # picked the POINT candidate -> name by track overlap
+                        tn0 = _track_name_for(cand_mask, tracks)
+                        cnm = tn0 or (nm if (nm and nm.upper() not in ("N/A", "NA")) else "")
+                        src0 = "point+track" if tn0 else "point"
+                    else:                                        # per-frame mode: the LLM names (legacy behavior)
+                        cnm, src0 = (nm if (nm and nm.upper() not in ("N/A", "NA")) else cand_name), "llm"
                     if cnm:
-                        name, chosen, conf, src = cnm, cands[choice][1], cands[choice][2], "llm"
+                        name, chosen, conf, src = cnm, cand_mask, cand_sc, src0
                 # FORCE-PICK: the gate already decided the hand IS manipulating, so do NOT fall back to N/A. If the
                 # VLM still vetoed every candidate, take the top one (highest manip score) and name it (forced).
                 if chosen is None and cands:
-                    tn, tm, ts_ = cands[0]; cnm = tn
+                    tn, tm, ts_ = cands[0]; cnm = tn; fsrc = "gate-pick"
+                    if not cnm and TRACKS_DIR:                    # TRACKS: name the forced point pick by track overlap
+                        cnm = _track_name_for(tm, tracks); fsrc = "point+track" if cnm else "gate-pick"
                     if not cnm:                                  # unnamed point candidate -> force a name from the list
                         _, fn2 = call_llm(gimgs, hand, len(cands), all_names,
                                           f"The {hand} hand IS manipulating the highlighted object — NAME it from the "
                                           "list; N/A is NOT allowed." + _tn)
                         cnm = fn2 if (fn2 and fn2.upper() not in ("N/A", "NA")) else None
                     if cnm:
-                        name, chosen, conf, src, choice = cnm, tm, ts_, "gate-pick", 0
+                        name, chosen, conf, src, choice = cnm, tm, ts_, ("track" if (TRACKS_DIR and tn) else fsrc), 0
                         _dbg(f"[FORCE] {tag} t={t:.1f} {hand}: gate=manip, VLM vetoed -> top cand {cnm!r} (sam={ts_:.2f})")
                 if DBG:                                              # CANDIDATE PANEL: every candidate + source
                     panel = rgb[ey0:ey1, ex0:ex1].copy(); rep = []
@@ -548,12 +640,26 @@ def main():
                         if len(yx):
                             yc, xc = map(int, yx.mean(0))
                             cv2.putText(panel, f"{j}{cand_src[j]}{star}", (xc, yc), cv2.FONT_HERSHEY_SIMPLEX, 0.8, col, 2, cv2.LINE_AA)
+                    cv2.rectangle(panel, (max(0, gx - focus) - ex0, max(0, gy - focus) - ey0),
+                                  (min(W, gx + focus) - ex0, min(H, gy + focus) - ey0), (255, 230, 0), 2)
                     cv2.circle(panel, (_clamp(int(ax) - ex0, 0, panel.shape[1] - 1),
                                        _clamp(int(ay) - ey0, 0, panel.shape[0] - 1)), 6, (255, 140, 0), -1)
                     panel = cv2.resize(panel, (panel.shape[1] * 2, panel.shape[0] * 2))
                     cv2.imwrite(os.path.join(outdir, f"{tag}_t{p['t']:05.1f}_{p['hand']}_cand.png"),
                                 cv2.cvtColor(panel, cv2.COLOR_RGB2BGR))
                     _dbg(f"[CAND] {tag} t={t:.1f} {hand} choice={choice}: " + " | ".join(rep))
+                    if os.environ.get("CAND_DUMP"):              # each candidate on its OWN full frame (verify what 0..n is)
+                        for j, (nm2, mk2, sc2) in enumerate(cands):
+                            vc = rgb.copy(); fc = vc.astype(np.float32)
+                            fc[mk2] = 0.5 * fc[mk2] + 0.5 * np.array(COLORS[j % len(COLORS)], np.float32)
+                            vc = fc.clip(0, 255).astype(np.uint8)
+                            ct, _ = cv2.findContours(mk2.astype(np.uint8), cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+                            cv2.drawContours(vc, ct, -1, COLORS[j % len(COLORS)], 3)
+                            cv2.rectangle(vc, (0, 0), (vc.shape[1], 30), (0, 0, 0), -1)
+                            cv2.putText(vc, f"{j}{cand_src[j]}: {nm2 or 'point-seg'}  sam={sc2:.2f}  area={int(mk2.sum())}px",
+                                        (8, 22), cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 0), 2, cv2.LINE_AA)
+                            cv2.imwrite(os.path.join(outdir, f"{tag}_t{p['t']:05.1f}_{p['hand']}_cand{j}.png"),
+                                        cv2.cvtColor(vc, cv2.COLOR_RGB2BGR))
 
             # RECOVERY: the gate says the hand IS manipulating but nothing grounded (empty pool / unnamed). The
             # object may be small/occluded/transparent and only findable ZOOMED. Text-seg each inventory name on
@@ -582,7 +688,9 @@ def main():
 
             # STEP 3.5: ZOOMED TEXT-SEG RE-SEGMENT — refine the chosen mask on a tight upscaled crop (helps
             # small/occluded parts). The result is the POINT-side mask (P) for the mask chooser below.
-            if ZOOM and chosen is not None and "zoom" not in src and name and name.upper() not in ("N/A", "NA"):
+            # SKIPPED in TRACKS mode: the displayed mask is the carried track mask / the picked point mask AS-IS,
+            # so the review shows exactly what tracking + point-seg produced (no per-frame re-seg behind it).
+            if ZOOM and not TRACKS_DIR and chosen is not None and "zoom" not in src and name and name.upper() not in ("N/A", "NA"):
                 zr = _zoom_reseg(rgb, name, gx, gy, ax, ay, hand_mask)
                 if zr is not None:
                     chosen, conf = zr[0], round(float(zr[1]), 3); src = (src + "+zoom") if src else "zoom"
@@ -590,8 +698,6 @@ def main():
                 else:
                     _dbg(f"[ZOOM] {tag} t={t:.1f} {hand}: '{name}' not re-found in zoom crop -> kept original mask")
 
-            if chosen is not None:                             # drop an adjacent touching instance the mask merged
-                chosen = _split_at_anchor(chosen, ax, ay)
             vis = rgb.copy(); locked = chosen is not None
             if locked:
                 f = vis.astype(np.float32); f[chosen] = 0.5 * f[chosen] + 0.5 * np.array(COLORS[0], np.float32)
@@ -616,8 +722,13 @@ def main():
             cv2.imwrite(os.path.join(outdir, fn), cv2.cvtColor(vis, cv2.COLOR_RGB2BGR))
             row = {"file": fn, "tag": tag, "hand": hand, "t": p["t"], "seg_id": sid, "primary": is_prim,
                    "obj": bool(locked), "name": name if locked else "N/A", "conf": round(conf, 3),
-                   "low_conf": bool(locked and conf < TRUST_THR), "src": src, "_mask": chosen}
+                   "low_conf": bool(locked and conf < TRUST_THR), "src": src, "_mask": chosen,
+                   "_gate_manip": bool(manip), "_gate_q1": int(q1), "_gate_q2": int(q2)}
             index.append(row)
+            if os.environ.get("SAVE_MASKS") and chosen is not None:   # dump chosen mask for the dense compositor
+                md = os.path.join(outdir, "_masks"); os.makedirs(md, exist_ok=True)
+                np.savez_compressed(os.path.join(md, f"{p['t']:08.3f}_{hand}.npz"),
+                                    m=np.packbits(chosen), shape=np.array(chosen.shape))
             if is_prim:
                 prim_prompt[sid] = p
             print(cap_txt, flush=True)
@@ -635,6 +746,12 @@ def main():
     for sid, rows in by_seg.items():
         prim = next((r for r in rows if r["primary"]), None)
         if prim is None or prim["obj"] or sid not in prim_prompt:
+            continue
+        # FIX #1: never let a neighbor override a CONFIDENT gate N/A. If the gate ruled not-manipulating with
+        # ZERO votes on BOTH questions (rock-solid empty / reaching / off-hand), trust that N/A — a neighbor that
+        # mis-grounded a worn/off-hand object must not propagate. Carry still fills a BORDERLINE N/A (>=1 gate vote)
+        # or an empty-pool failure where the gate actually said manip (Mode-2).
+        if not prim.get("_gate_manip", True) and prim.get("_gate_q1", 1) == 0 and prim.get("_gate_q2", 1) == 0:
             continue
         nbrs = [r for r in rows if not r["primary"] and r["obj"] and r["conf"] >= TRUST_THR]
         if not nbrs:

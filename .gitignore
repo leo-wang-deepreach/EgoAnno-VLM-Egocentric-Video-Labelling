@@ -57,7 +57,12 @@ run_batch30.sh
 # Videos-Leo batch (private vendor footage)
 Videos-Leo/
 Videos-Leo-PROGRESS.md
+Videos-Leo-SUMMARY.md
 leo_batch.py
+# Videos-Leo timeline editor + overlays (tooling over private footage / leo_edited GT)
+leo_editor.html
+leo_editor_server.py
+leo_overlays.py
 
 # local build tracker (contains clip-specifics — keep OUT of the public repo)
 todo.md

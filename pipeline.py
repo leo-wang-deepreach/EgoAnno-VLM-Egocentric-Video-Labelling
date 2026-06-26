@@ -95,7 +95,7 @@ def _spans(bounds: list[float]) -> list[tuple[float, float]]:
     return [(bounds[i], bounds[i + 1]) for i in range(len(bounds) - 1)]
 
 
-def _parallel(fn, items, levels=(8, 6, 4), wd: Path | None = None, tag: str = ""):
+def _parallel(fn, items, levels=(4, 3, 2), wd: Path | None = None, tag: str = ""):
     """Run fn(item) concurrently, STARTING at levels[0] workers; any item whose fn raises
     is retried at the next-lower worker level (graceful rate-limit fallback 8 -> 6 -> 4).
     Returns results in input order; an item that fails at every level becomes None."""
