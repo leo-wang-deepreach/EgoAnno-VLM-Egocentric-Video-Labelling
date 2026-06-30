@@ -23,6 +23,8 @@ import os
 import subprocess
 import sys
 import tempfile
+import threading
+from concurrent.futures import ThreadPoolExecutor
 
 import cv2
 import numpy as np
@@ -45,6 +47,11 @@ TRACKS_DIR = os.environ.get("TRACKS_DIR", "")           # SAM3-VIDEO tracks: whe
 #   OUTLINE (track-text-seg vs point-seg) — it does not re-name a tracked object. Unset -> per-frame text-seg.
 COLORS = [(80, 255, 80), (80, 160, 255), (255, 255, 60), (255, 80, 255), (80, 255, 255), (255, 160, 80)]
 _DBGF = None
+import time as _time
+_SAM_LOCK = threading.RLock()                           # serializes GPU/SAM calls; VLM (network) runs unlocked
+_TIMERS = {}                                            # PROFILE: wall-time per stage (env PROFILE=1 prints it)
+def _tick(k, t0):
+    _TIMERS[k] = _TIMERS.get(k, 0.0) + (_time.perf_counter() - t0)
 
 
 def _dbg(m):
@@ -168,9 +175,11 @@ def _ti_band_score(mk, tp, ip):
 
 def call_llm(imgs, hand, n, names, feedback=""):
     """STEP 3: Claude picks the manipulated candidate # + names it from the vocab (or -1/N/A)."""
+    _t0 = _time.perf_counter()
     try:
         out = subprocess.run([PY310, os.path.join(HERE, "llm_pick.py"), ",".join(imgs), hand, str(n),
                               ",".join(names), feedback], capture_output=True, text=True, timeout=150)
+        _tick("vlm_pick", _t0)
         r = json.loads(out.stdout.strip().splitlines()[-1])
         return int(r.get("choice", -1)), (r.get("name") or "N/A").strip()
     except Exception as e:
@@ -184,9 +193,11 @@ def call_manip(imgs, hand, k=None):
     k defaults to env GATE_K (3) so the number of gate votes is tunable for cost."""
     if k is None:
         k = int(os.environ.get("GATE_K", "3"))
+    _t0 = _time.perf_counter()
     try:
         out = subprocess.run([PY310, os.path.join(HERE, "llm_manip.py"), ",".join(imgs), hand, str(k)],
                              capture_output=True, text=True, timeout=240)
+        _tick("vlm_gate", _t0)
         r = json.loads(out.stdout.strip().splitlines()[-1])
         q1 = int(r.get("q1", 0)); kk = int(r.get("k", k)) or k
         return bool(r.get("manip", False)), q1, int(r.get("q2", 0)), (q1 * 2 > kk)
@@ -197,6 +208,7 @@ def call_manip(imgs, hand, k=None):
 
 def main():
     global _DBGF
+    _t_main = _time.perf_counter()
     outdir, inv_file, prompts_file = sys.argv[1], sys.argv[2], sys.argv[3]
     os.makedirs(outdir, exist_ok=True)
     if DBG:
@@ -238,7 +250,7 @@ def main():
         x0, y0, x1, y1 = box
         yl, yh = max(0, int(ay) - pw), min(H, int(ay) + pw + 1)
         xl, xh = max(0, int(ax) - pw), min(W, int(ax) + pw + 1)
-        with torch.inference_mode(), ac:
+        with _SAM_LOCK, torch.inference_mode(), ac:
             st = proc.set_image(Image.fromarray(rgb2))
             out = proc.set_text_prompt(state=st, prompt=nm.split(" with ")[0].strip())
         tm = _np(out["masks"]); ts = _np(out["scores"]).ravel()
@@ -293,7 +305,7 @@ def main():
         f = max(1, int(512 / max(crop.shape[:2])))            # upscale the crop to ~512px
         up = cv2.resize(crop, (crop.shape[1] * f, crop.shape[0] * f), interpolation=cv2.INTER_CUBIC)
         Hu, Wu = up.shape[:2]; acx, acy = (ax - cx0) * f, (ay - cy0) * f   # anchor in upscaled-crop coords
-        with torch.inference_mode(), ac:
+        with _SAM_LOCK, torch.inference_mode(), ac:
             st = proc.set_image(Image.fromarray(up))
             out = proc.set_text_prompt(state=st, prompt=nm.split(" with ")[0].strip())
         tm = _np(out["masks"]); ts = _np(out["scores"]).ravel()
@@ -325,11 +337,16 @@ def main():
 
     index = []
     prim_prompt = {}                                     # seg_id -> the primary prompt (for temporal re-seg)
-    for t, plist in sorted(by_t.items()):
-        cap.set(cv2.CAP_PROP_POS_MSEC, t * 1000.0); ok, bgr = cap.read()
-        if not ok:
-            continue
-        rgb = cv2.cvtColor(bgr, cv2.COLOR_BGR2RGB)
+    _frames = {}                                         # pre-decode all frames SEQUENTIALLY (cap is not thread-safe)
+    for _t in sorted(by_t):
+        cap.set(cv2.CAP_PROP_POS_MSEC, _t * 1000.0); _ok, _bgr = cap.read()
+        if _ok:
+            _frames[_t] = cv2.cvtColor(_bgr, cv2.COLOR_BGR2RGB)
+
+    def _do_frame(t, plist):                             # one frame's work; run concurrently across frames.
+        rgb = _frames.get(t)                             # SAM calls serialize on _SAM_LOCK; VLM (gate/pick) overlaps.
+        if rgb is None:
+            return
         tracks = {}                                              # TRACKS lane: {name: carried mask} at this time
         if TRACKS_DIR:
             npz = os.path.join(TRACKS_DIR, f"{tag}_t{t:05.1f}.npz")
@@ -337,7 +354,7 @@ def main():
                 z = np.load(npz, allow_pickle=True)
                 tracks = {k: z[k].astype(bool) for k in z.files if z[k].shape == (H, W) and z[k].any()}
             _dbg(f"[TRACKS] {tag} t={t:.1f}: {sorted(tracks)} (npz={'Y' if os.path.exists(npz) else 'MISSING'})")
-        with torch.inference_mode(), ac:
+        with _SAM_LOCK, torch.inference_mode(), ac:
             state = proc.set_image(Image.fromarray(rgb))
             segs = []                                            # STEP 1: (name, mask, score) per verified object
             if not TRACKS_DIR:                                   # per-frame text-seg (skipped when tracking)
@@ -375,7 +392,7 @@ def main():
             # held BETWEEN skin fingers, so it is not used).
             hand_mask = None
             if hull is not None and len(hull) >= 3:
-                with torch.inference_mode(), ac:
+                with _SAM_LOCK, torch.inference_mode(), ac:
                     hm, hs, _ = model.predict_inst(state, point_coords=hull.astype(np.float32),
                                                    point_labels=np.ones(len(hull), int), multimask_output=True)
                 hm = _np(hm); hs = _np(hs).ravel()
@@ -423,7 +440,7 @@ def main():
                 return 0.42 * prox + 0.30 * (1.0 - oh) + 0.12 * sized + 0.16 * float(sam), dist
 
             def _seg_at(sx, sy):                               # SAM point-prompt + single-blob cleanup + validity
-                with torch.inference_mode(), ac:
+                with _SAM_LOCK, torch.inference_mode(), ac:
                     pm, ps, _ = model.predict_inst(state, point_coords=np.array([[int(sx), int(sy)]] + neg_all, float),
                                                    point_labels=np.array([1] + [0] * len(neg_all), int),
                                                    multimask_output=True)
@@ -733,6 +750,12 @@ def main():
                 prim_prompt[sid] = p
             print(cap_txt, flush=True)
 
+    # Run frames CONCURRENTLY: SAM serializes on _SAM_LOCK (GPU-bound), VLM gate/pick overlap (network-bound).
+    _workers = int(os.environ.get("GROUND_WORKERS", "12"))   # SAM serializes on the lock; ~12 fully hides the VLM
+    with ThreadPoolExecutor(max_workers=_workers) as _ex:
+        list(_ex.map(lambda _tp: _do_frame(*_tp), sorted(by_t.items())))
+    index.sort(key=lambda r: (r["seg_id"], r["t"], r["hand"]))   # deterministic order despite concurrent appends
+
     # ===================== LAYER-2 TEMPORAL CARRY =====================
     # A PRIMARY frame that came back N/A is often a single-frame failure (Mode-2 empty pool, or the bad-keypoint
     # pile splaying the pose) while a NEIGHBOR frame in the SAME segment grounded the held object cleanly. Carry
@@ -786,6 +809,13 @@ def main():
     json.dump(prim_index, open(os.path.join(outdir, f"_index_{tag}.json"), "w"), indent=2)
     n = sum(1 for r in prim_index if r["obj"])
     print(f"\n{tag}: {len(prim_index)} primary frames, {n} grounded, {len(prim_index) - n} N/A")
+    if os.environ.get("PROFILE"):
+        tot = _time.perf_counter() - _t_main; nf = max(1, len(index))
+        vlm = _TIMERS.get("vlm_gate", 0) + _TIMERS.get("vlm_pick", 0)
+        print(f"[PROFILE] total={tot:.1f}s  frames={len(index)}  ({tot/nf:.1f}s/frame)  workers={_workers}")
+        note = "  (VLM sums OVERLAP under concurrency -> not a clean split)" if _workers > 1 else ""
+        print(f"[PROFILE]   VLM gate={_TIMERS.get('vlm_gate',0):.1f}s  pick={_TIMERS.get('vlm_pick',0):.1f}s "
+              f"(summed across threads){note}")
 
 
 if __name__ == "__main__":

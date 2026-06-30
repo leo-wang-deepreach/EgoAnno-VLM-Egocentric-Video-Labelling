@@ -138,7 +138,8 @@ class GeminiVideo:
     def watch(self, prompt: str, system: str, schema: dict,
               a: float | None = None, b: float | None = None,
               fps: float | None = None, max_tokens: int = 16000,
-              temperature: float = 0.15, retries: int = 4) -> dict:
+              temperature: float = 0.15, retries: int = 4,
+              media_resolution: str | None = None) -> dict:
         assert self.file_uri, "call upload() first"
         fd = {"file_data": {"mime_type": "video/mp4", "file_uri": self.file_uri}}
         meta = {}
@@ -158,6 +159,8 @@ class GeminiVideo:
                                  "responseMimeType": "application/json",
                                  "responseSchema": schema},
         }
+        if media_resolution:                     # e.g. MEDIA_RESOLUTION_LOW -> ~4x more video/window
+            body["generationConfig"]["mediaResolution"] = media_resolution
         url = f"{GEMINI_BASE}/v1beta/models/{self.model}:generateContent?key={self.key}"
         last = None
         for attempt in range(retries):
